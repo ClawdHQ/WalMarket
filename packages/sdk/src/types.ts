@@ -14,7 +14,22 @@ export interface MemoryListing {
   oldestMemoryEpoch: number;
   salePriceMist: bigint | null;
   rentPricePerHourMist: bigint | null;
+  // Streaming/pay-per-query price — null means the seller hasn't opted in.
+  pricePerQueryMist: bigint | null;
   isActive: boolean;
+  createdAt: number;
+  // On-chain reputation: sum/count rather than a precomputed average — compute
+  // reviewCount > 0 ? ratingSum / reviewCount : null yourself.
+  ratingSum: number;
+  reviewCount: number;
+}
+
+export interface Review {
+  id: string;
+  listingId: string;
+  reviewer: string;
+  rating: number;
+  comment: string;
   createdAt: number;
 }
 
@@ -57,6 +72,7 @@ export interface CreateListingParams {
   oldestMemoryEpoch: number;
   salePriceMist?: bigint;
   rentPricePerHourMist?: bigint;
+  pricePerQueryMist?: bigint;
 }
 
 export interface RentParams {

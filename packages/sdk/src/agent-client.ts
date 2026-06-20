@@ -22,8 +22,14 @@ export interface SerializedListing {
   salePriceSui: string | null;
   rentPricePerHourMist: string | null;
   rentPricePerHourSui: string | null;
+  pricePerQueryMist: string | null;
+  pricePerQuerySui: string | null;
   isActive: boolean;
   createdAt: number;
+  // Reputation, from on-chain reviews gated to verified buyers/renters only
+  // (see submit_review) — averageRating is null until reviewCount > 0.
+  reviewCount: number;
+  averageRating: number | null;
 }
 
 export interface PaymentDetails {
@@ -57,6 +63,18 @@ export interface PaymentDetails {
     checkAnswerEndpoint: string;
     freeQueriesUsedEndpoint: string;
   };
+  // Streaming/pay-per-query: unlike `query` above (capped, free), this is
+  // unlimited — pay pricePerQueryMist every time you call it. null if the
+  // seller hasn't opted in. Built for agent-to-agent usage that wants to keep
+  // paying small amounts per message instead of buying full access up front.
+  payPerQuery: {
+    function: string;
+    pricePerQueryMist: string;
+    pricePerQuerySui: string;
+    moveCallTarget: string;
+    args: string[];
+    checkAnswerEndpoint: string;
+  } | null;
   instructions: string[];
 }
 
@@ -87,6 +105,12 @@ export interface BrowseResult {
     registryId: string;
     rpc: string;
   };
+}
+
+export interface DiscoverResult {
+  need: string;
+  results: (SerializedListing & { relevanceScore: number })[];
+  _meta: { network: string; packageId: string; latestPackageId: string; registryId: string; rpc: string };
 }
 
 export interface AccessInfo {
@@ -138,6 +162,20 @@ export class AgentClient {
     const res = await fetch(this.url(`/api/agent/listings?${params}`));
     if (!res.ok) throw new Error(`Browse failed: ${res.status} ${await res.text()}`);
     return res.json() as Promise<BrowseResult>;
+  }
+
+  // Discovery layer for agent-to-agent commerce: describe what you need in
+  // plain language ("Sui DeFi domain knowledge") and get back active listings
+  // ranked by relevance — no human curating which listing matches which need.
+  // Relevance is keyword/category overlap against title+description+category
+  // (see /api/agent/discover), not a black box — good enough to find the right
+  // listing among dozens without requiring a separate embedding index.
+  async discover(params: { need: string; limit?: number }): Promise<DiscoverResult> {
+    const qs = new URLSearchParams({ need: params.need });
+    if (params.limit !== undefined) qs.set('limit', String(params.limit));
+    const res = await fetch(this.url(`/api/agent/discover?${qs}`));
+    if (!res.ok) throw new Error(`Discover failed: ${res.status} ${await res.text()}`);
+    return res.json() as Promise<DiscoverResult>;
   }
 
   // Get a single listing with full payment instruction object. Pass your own

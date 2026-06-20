@@ -17,8 +17,11 @@ function parseListing(id: string, fields: Record<string, unknown>): MemoryListin
     oldestMemoryEpoch: Number(fields['oldest_memory_epoch'] ?? 0),
     salePriceMist: fields['sale_price_mist'] != null ? BigInt(fields['sale_price_mist'] as string) : null,
     rentPricePerHourMist: fields['rent_price_per_hour_mist'] != null ? BigInt(fields['rent_price_per_hour_mist'] as string) : null,
+    pricePerQueryMist: fields['price_per_query_mist'] != null ? BigInt(fields['price_per_query_mist'] as string) : null,
     isActive: (fields['is_active'] as boolean) ?? true,
     createdAt: Number(fields['created_at'] ?? 0),
+    ratingSum: Number(fields['total_rating_sum'] ?? 0),
+    reviewCount: Number(fields['review_count'] ?? 0),
   };
 }
 

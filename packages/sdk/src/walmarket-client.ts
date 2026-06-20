@@ -1,7 +1,7 @@
 import { Transaction } from '@mysten/sui/transactions';
 import type { SuiClient } from '@mysten/sui/client';
 import { EventIndexer } from './event-indexer.js';
-import type { MemoryListing, RentAccess, CreateListingParams, RentParams, ListingFilter } from './types.js';
+import type { MemoryListing, RentAccess, Review, CreateListingParams, RentParams, ListingFilter } from './types.js';
 
 const SUI_CLOCK_ID = '0x6';
 
@@ -118,6 +118,9 @@ export class WalMarketClient {
     const rentPriceArg = params.rentPricePerHourMist !== undefined
       ? tx.pure.option('u64', params.rentPricePerHourMist)
       : tx.pure.option('u64', null);
+    const queryPriceArg = params.pricePerQueryMist !== undefined
+      ? tx.pure.option('u64', params.pricePerQueryMist)
+      : tx.pure.option('u64', null);
 
     tx.moveCall({
       target: `${this.config.packageId}::walmarket::create_listing`,
@@ -132,6 +135,7 @@ export class WalMarketClient {
         tx.pure.u64(params.oldestMemoryEpoch),
         salePriceArg,
         rentPriceArg,
+        queryPriceArg,
         clock,
       ],
     });
@@ -272,6 +276,39 @@ export class WalMarketClient {
     return { digest: result.digest, queryId };
   }
 
+  // Streaming/pay-per-query: unlike requestQuery, never capped — pays
+  // listing.price_per_query_mist per message and reuses the exact same
+  // QueryRequest/QueryRequested pathway, so the seller's existing
+  // query-responder agent answers these with zero changes on its end.
+  async payPerQuery(
+    signer: Signer,
+    listingId: string,
+    message: string,
+    priceMist: bigint,
+  ): Promise<{ digest: string; queryId: string }> {
+    const tx = new Transaction();
+    const clock = tx.object(SUI_CLOCK_ID);
+    const [coin] = tx.splitCoins(tx.gas, [tx.pure.u64(priceMist)]);
+
+    tx.moveCall({
+      target: `${this.latestPackageId}::walmarket::pay_per_query`,
+      arguments: [
+        tx.object(this.config.registryId),
+        tx.object(listingId),
+        coin,
+        tx.pure.string(message),
+        clock,
+      ],
+    });
+
+    const result = await signer.signAndExecuteTransaction({ transaction: tx, options: { showEffects: true, showEvents: true } });
+    const events = (result.events ?? []) as Array<{ type: string; parsedJson: Record<string, unknown> }>;
+    const queryEvt = events.find(e => e.type.endsWith('::QueryRequested'));
+    const queryId = (queryEvt?.parsedJson?.['query_id'] as string) ?? '';
+
+    return { digest: result.digest, queryId };
+  }
+
   // Called by the listing's operator (the seller's own agent keypair, not
   // necessarily their zkLogin owner wallet — see set_operator) after running
   // the actual MemWal /api/ask call.
@@ -307,6 +344,67 @@ export class WalMarketClient {
     });
     const result = await signer.signAndExecuteTransaction({ transaction: tx, options: { showEffects: true } });
     return { digest: result.digest };
+  }
+
+  // On-chain reputation: only succeeds if `accessId` is a RentAccess the caller
+  // actually holds for this exact listing (submit_review's ENotAccessHolder
+  // guard) — proof of a real purchase/rental, not an anonymous claim.
+  async submitReview(
+    signer: Signer,
+    listingId: string,
+    accessId: string,
+    rating: number,
+    comment: string,
+  ): Promise<{ digest: string }> {
+    const tx = new Transaction();
+    const clock = tx.object(SUI_CLOCK_ID);
+    tx.moveCall({
+      target: `${this.latestPackageId}::walmarket::submit_review`,
+      arguments: [
+        tx.object(listingId),
+        tx.object(accessId),
+        tx.pure.u8(rating),
+        tx.pure.string(comment),
+        clock,
+      ],
+    });
+    const result = await signer.signAndExecuteTransaction({ transaction: tx, options: { showEffects: true } });
+    return { digest: result.digest };
+  }
+
+  // Reviews are shared objects (like QueryRequest) — there's no per-listing
+  // index on-chain, so this filters the global ReviewSubmitted event stream by
+  // listing_id, then fetches each matching Review object directly (the event
+  // itself only carries listing_id/reviewer/rating/review_id, not the comment
+  // text). Fine at hackathon scale — a high-traffic "recent reviews" feed would
+  // want EventIndexer-style caching instead of refetching on every call.
+  async getReviewsForListing(listingId: string, limit = 50): Promise<Review[]> {
+    const events = await this.client.queryEvents({
+      query: { MoveEventType: `${this.config.packageId}::walmarket::ReviewSubmitted` },
+      limit: 1000,
+      order: 'descending',
+    });
+    const reviewIds = events.data
+      .filter(e => (e.parsedJson as Record<string, unknown>)['listing_id'] === listingId)
+      .slice(0, limit)
+      .map(e => (e.parsedJson as Record<string, unknown>)['review_id'] as string);
+
+    if (reviewIds.length === 0) return [];
+
+    const objects = await this.client.multiGetObjects({ ids: reviewIds, options: { showContent: true } });
+    return objects
+      .filter(o => o.data?.content?.dataType === 'moveObject')
+      .map(o => {
+        const f = (o.data!.content as { fields: Record<string, unknown> }).fields;
+        return {
+          id: o.data!.objectId,
+          listingId: f['listing_id'] as string,
+          reviewer: f['reviewer'] as string,
+          rating: Number(f['rating'] ?? 0),
+          comment: f['comment'] as string,
+          createdAt: Number(f['created_at'] ?? 0),
+        };
+      });
   }
 
   // Direct object read — the frontend polls this instead of any off-chain
@@ -366,6 +464,7 @@ export class WalMarketClient {
     listingId: string,
     salePriceMist: bigint | null,
     rentPricePerHourMist: bigint | null,
+    pricePerQueryMist: bigint | null = null,
   ): Promise<{ digest: string }> {
     const tx = new Transaction();
     tx.moveCall({
@@ -374,6 +473,7 @@ export class WalMarketClient {
         tx.object(listingId),
         tx.pure.option('u64', salePriceMist),
         tx.pure.option('u64', rentPricePerHourMist),
+        tx.pure.option('u64', pricePerQueryMist),
       ],
     });
     const result = await signer.signAndExecuteTransaction({ transaction: tx });
@@ -424,8 +524,11 @@ export class WalMarketClient {
       oldestMemoryEpoch: Number(fields['oldest_memory_epoch'] ?? 0),
       salePriceMist: fields['sale_price_mist'] != null ? BigInt(fields['sale_price_mist'] as string) : null,
       rentPricePerHourMist: fields['rent_price_per_hour_mist'] != null ? BigInt(fields['rent_price_per_hour_mist'] as string) : null,
+      pricePerQueryMist: fields['price_per_query_mist'] != null ? BigInt(fields['price_per_query_mist'] as string) : null,
       isActive: fields['is_active'] as boolean,
       createdAt: Number(fields['created_at'] ?? 0),
+      ratingSum: Number(fields['total_rating_sum'] ?? 0),
+      reviewCount: Number(fields['review_count'] ?? 0),
     };
   }
 }
