@@ -1,0 +1,30 @@
+{
+  "name": "@walmarket/sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./agents": {
+      "import": "./dist/agents/index.js",
+      "types": "./dist/agents/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@mysten/sui": "^1.x",
+    "@mysten/seal": "^0.x",
+    "@mysten/walrus": "^0.x",
+    "@mysten-incubation/memwal": "latest"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}
