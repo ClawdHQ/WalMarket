@@ -20,6 +20,9 @@ module walmarket::walmarket {
     const ENotOperator: u64       = 11;
     const EQueryLimitReached: u64 = 12;
     const EAlreadyAnswered: u64   = 13;
+    const EQueryPriceNotSet: u64  = 14;
+    const EInvalidRating: u64     = 15;
+    const ENotAccessHolder: u64   = 16;
 
     const MAX_CATEGORY: u8 = 4;
     const MIN_RENT_HOURS: u64 = 1;
@@ -59,6 +62,11 @@ module walmarket::walmarket {
         oldest_memory_epoch: u64,
         sale_price_mist: Option<u64>,
         rent_price_per_hour_mist: Option<u64>,
+        // Streaming/pay-per-query price: charge a flat micropayment per message
+        // via pay_per_query, unlimited (no free-cap), instead of requiring a full
+        // purchase or rental up front. `none` means the seller hasn't opted in —
+        // request_query (the free trial) is unaffected either way.
+        price_per_query_mist: Option<u64>,
         is_active: bool,
         created_at: u64,
         // Per-buyer count of free try-before-you-buy queries used so far —
@@ -66,6 +74,12 @@ module walmarket::walmarket {
         // (delist only flips is_active), so the table just lives for the
         // object's lifetime.
         free_query_counts: Table<address, u64>,
+        // On-chain reputation: sum/count rather than a precomputed average, so
+        // there's no fixed-point rounding to reason about — callers compute
+        // total_rating_sum / review_count themselves. Only updated by
+        // submit_review, which requires proof of a real purchase/rental.
+        total_rating_sum: u64,
+        review_count: u64,
     }
 
     public struct RentAccess has key, store {
@@ -93,6 +107,18 @@ module walmarket::walmarket {
         message: String,
         answer: Option<String>,
         memories_used: u64,
+        created_at: u64,
+    }
+
+    // On-chain reputation signal — only mintable by someone holding a RentAccess
+    // for this exact listing (see submit_review), so ratings reflect verified
+    // buyers/renters, not anonymous drive-by reviews.
+    public struct Review has key {
+        id: UID,
+        listing_id: ID,
+        reviewer: address,
+        rating: u8,
+        comment: String,
         created_at: u64,
     }
 
@@ -151,6 +177,13 @@ module walmarket::walmarket {
         listing_id: ID,
     }
 
+    public struct ReviewSubmitted has copy, drop {
+        listing_id: ID,
+        reviewer: address,
+        rating: u8,
+        review_id: ID,
+    }
+
     // ─── Init ──────────────────────────────────────────────────────────────────
 
     fun init(ctx: &mut TxContext) {
@@ -177,6 +210,7 @@ module walmarket::walmarket {
         oldest_memory_epoch: u64,
         sale_price_mist: Option<u64>,
         rent_price_per_hour_mist: Option<u64>,
+        price_per_query_mist: Option<u64>,
         clock: &Clock,
         ctx: &mut TxContext,
     ) {
@@ -196,9 +230,12 @@ module walmarket::walmarket {
             oldest_memory_epoch,
             sale_price_mist,
             rent_price_per_hour_mist,
+            price_per_query_mist,
             is_active: true,
             created_at: clock.timestamp_ms(),
             free_query_counts: table::new(ctx),
+            total_rating_sum: 0,
+            review_count: 0,
         };
         registry.listing_count = registry.listing_count + 1;
         event::emit(ListingCreated {
@@ -216,11 +253,13 @@ module walmarket::walmarket {
         listing: &mut MemoryListing,
         sale_price_mist: Option<u64>,
         rent_price_per_hour_mist: Option<u64>,
+        price_per_query_mist: Option<u64>,
         ctx: &mut TxContext,
     ) {
         assert!(listing.owner == ctx.sender(), ENotOwner);
         listing.sale_price_mist = sale_price_mist;
         listing.rent_price_per_hour_mist = rent_price_per_hour_mist;
+        listing.price_per_query_mist = price_per_query_mist;
         event::emit(ListingUpdated { listing_id: object::id(listing) });
     }
 
@@ -486,6 +525,67 @@ module walmarket::walmarket {
         });
     }
 
+    // ─── Buyer: pay-per-query (streaming, unlimited) ───────────────────────────
+    // Unlike request_query, this is never capped — it's the streaming-pricing
+    // counterpart for agent-to-agent usage that wants to keep paying small
+    // amounts per message rather than buying full access up front. Reuses the
+    // exact same QueryRequest object/QueryRequested event as the free trial, so
+    // the existing query-responder agent infrastructure needs no changes to
+    // pick these up and answer them.
+    public entry fun pay_per_query(
+        registry: &mut WalMarketRegistry,
+        listing: &mut MemoryListing,
+        payment: Coin<SUI>,
+        message: String,
+        clock: &Clock,
+        ctx: &mut TxContext,
+    ) {
+        assert!(listing.is_active, EListingInactive);
+        assert!(!message.is_empty(), EInvalidMessage);
+        assert!(option::is_some(&listing.price_per_query_mist), EQueryPriceNotSet);
+        let price = *option::borrow(&listing.price_per_query_mist);
+        assert!(coin::value(&payment) >= price, EInsufficientPayment);
+
+        let fee = price * registry.fee_bps / FEE_BPS_DENOM;
+        let seller_amount = price - fee;
+
+        let mut payment_mut = payment;
+        let fee_coin = coin::split(&mut payment_mut, fee, ctx);
+        let seller_coin = coin::split(&mut payment_mut, seller_amount, ctx);
+
+        transfer::public_transfer(fee_coin, registry.fee_recipient);
+        transfer::public_transfer(seller_coin, listing.owner);
+
+        if (coin::value(&payment_mut) > 0) {
+            transfer::public_transfer(payment_mut, ctx.sender());
+        } else {
+            coin::destroy_zero(payment_mut);
+        };
+
+        registry.total_volume_mist = registry.total_volume_mist + price;
+
+        let sender = ctx.sender();
+        let query_uid = object::new(ctx);
+        let query_id = object::uid_to_inner(&query_uid);
+
+        let query = QueryRequest {
+            id: query_uid,
+            listing_id: object::id(listing),
+            requester: sender,
+            message,
+            answer: option::none(),
+            memories_used: 0,
+            created_at: clock.timestamp_ms(),
+        };
+        transfer::share_object(query);
+
+        event::emit(QueryRequested {
+            listing_id: object::id(listing),
+            requester: sender,
+            query_id,
+        });
+    }
+
     // ─── Seller agent: submit a query answer ───────────────────────────────────
     // Gated to the listing's operator — Sui's native transaction signing IS the
     // authentication here, unlike the old (unrestricted) probe response. Only
@@ -508,6 +608,47 @@ module walmarket::walmarket {
         event::emit(QueryAnswered {
             query_id: object::id(query),
             listing_id: query.listing_id,
+        });
+    }
+
+    // ─── Buyer/renter: submit an on-chain review ───────────────────────────────
+    // Reputation signal for agent-to-agent discovery: a rating only counts if
+    // the reviewer holds a real RentAccess for this exact listing (proof of a
+    // completed purchase or rental) — proof is the object itself, not a claim,
+    // so this can't be spammed by addresses that never actually bought anything.
+    public entry fun submit_review(
+        listing: &mut MemoryListing,
+        access: &RentAccess,
+        rating: u8,
+        comment: String,
+        clock: &Clock,
+        ctx: &mut TxContext,
+    ) {
+        assert!(access.renter == ctx.sender(), ENotAccessHolder);
+        assert!(access.listing_id == object::id(listing), ENotAccessHolder);
+        assert!(rating >= 1 && rating <= 5, EInvalidRating);
+
+        let sender = ctx.sender();
+        let review_uid = object::new(ctx);
+        let review_id = object::uid_to_inner(&review_uid);
+        let review = Review {
+            id: review_uid,
+            listing_id: object::id(listing),
+            reviewer: sender,
+            rating,
+            comment,
+            created_at: clock.timestamp_ms(),
+        };
+        transfer::share_object(review);
+
+        listing.total_rating_sum = listing.total_rating_sum + (rating as u64);
+        listing.review_count = listing.review_count + 1;
+
+        event::emit(ReviewSubmitted {
+            listing_id: object::id(listing),
+            reviewer: sender,
+            rating,
+            review_id,
         });
     }
 
@@ -539,6 +680,9 @@ module walmarket::walmarket {
     public fun listing_is_active(listing: &MemoryListing): bool { listing.is_active }
     public fun listing_sale_price(listing: &MemoryListing): Option<u64> { listing.sale_price_mist }
     public fun listing_rent_price(listing: &MemoryListing): Option<u64> { listing.rent_price_per_hour_mist }
+    public fun listing_price_per_query(listing: &MemoryListing): Option<u64> { listing.price_per_query_mist }
+    public fun listing_rating_sum(listing: &MemoryListing): u64 { listing.total_rating_sum }
+    public fun listing_review_count(listing: &MemoryListing): u64 { listing.review_count }
     public fun listing_free_queries_used(listing: &MemoryListing, addr: address): u64 {
         if (table::contains(&listing.free_query_counts, addr)) {
             *table::borrow(&listing.free_query_counts, addr)
@@ -547,8 +691,12 @@ module walmarket::walmarket {
         }
     }
     public fun rent_access_expires(access: &RentAccess): u64 { access.expires_at }
+    public fun rent_access_listing_id(access: &RentAccess): ID { access.listing_id }
     public fun query_answer(query: &QueryRequest): &Option<String> { &query.answer }
     public fun query_memories_used(query: &QueryRequest): u64 { query.memories_used }
+    public fun review_rating(review: &Review): u8 { review.rating }
+    public fun review_comment(review: &Review): String { review.comment }
+    public fun review_listing_id(review: &Review): ID { review.listing_id }
     public fun registry_fee_bps(registry: &WalMarketRegistry): u64 { registry.fee_bps }
     public fun registry_volume(registry: &WalMarketRegistry): u64 { registry.total_volume_mist }
 }

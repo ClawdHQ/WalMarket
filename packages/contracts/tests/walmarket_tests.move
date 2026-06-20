@@ -12,6 +12,7 @@ module walmarket::walmarket_tests {
         MemoryListing,
         RentAccess,
         QueryRequest,
+        Review,
     };
 
 
@@ -23,6 +24,10 @@ module walmarket::walmarket_tests {
     // ─── Helpers ───────────────────────────────────────────────────────────────
 
     fun make_listing(scenario: &mut Scenario, clock: &Clock) {
+        make_listing_with_query_price(scenario, clock, option::none());
+    }
+
+    fun make_listing_with_query_price(scenario: &mut Scenario, clock: &Clock, price_per_query_mist: Option<u64>) {
         ts::next_tx(scenario, SELLER);
         let mut registry = ts::take_shared<WalMarketRegistry>(scenario);
         walmarket::create_listing(
@@ -36,6 +41,7 @@ module walmarket::walmarket_tests {
             1_700_000_000_000u64,
             option::some(1_000_000_000u64),          // 1 SUI sale price
             option::some(100_000_000u64),             // 0.1 SUI/hr rent
+            price_per_query_mist,
             clock,
             ts::ctx(scenario),
         );
@@ -299,6 +305,7 @@ module walmarket::walmarket_tests {
                 &mut listing,
                 option::none(),
                 option::none(),
+                option::none(),
                 ts::ctx(&mut scenario),
             );
             ts::return_shared(listing);
@@ -370,6 +377,7 @@ module walmarket::walmarket_tests {
                 0u8, 100u64, 1_700_000_000_000u64,
                 option::none(),                            // no sale price
                 option::some(100_000_000u64),
+                option::none(),
                 &clock,
                 ts::ctx(&mut scenario),
             );
@@ -710,6 +718,215 @@ module walmarket::walmarket_tests {
             );
             ts::return_shared(listing);
             ts::return_shared(query);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    // ─── Test: pay_per_query (streaming pricing) ──────────────────────────────
+
+    #[test]
+    fun test_pay_per_query_succeeds_and_credits_volume() {
+        let mut scenario = ts::begin(SELLER);
+        { walmarket::init_for_testing(ts::ctx(&mut scenario)); };
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        make_listing_with_query_price(&mut scenario, &clock, option::some(10_000_000u64)); // 0.01 SUI/query
+
+        ts::next_tx(&mut scenario, BUYER);
+        {
+            let mut registry = ts::take_shared<WalMarketRegistry>(&scenario);
+            let mut listing = ts::take_shared<MemoryListing>(&scenario);
+            let payment = coin::mint_for_testing<SUI>(10_000_000u64, ts::ctx(&mut scenario));
+            walmarket::pay_per_query(
+                &mut registry, &mut listing, payment, string::utf8(b"What do you know?"), &clock, ts::ctx(&mut scenario),
+            );
+            // Unlike request_query, pay_per_query never touches the free-query counter.
+            assert!(walmarket::listing_free_queries_used(&listing, BUYER) == 0, 80);
+            assert!(walmarket::registry_volume(&registry) == 10_000_000u64, 81);
+            ts::return_shared(registry);
+            ts::return_shared(listing);
+        };
+
+        // A second paid query from the same buyer must also succeed — there's no cap.
+        ts::next_tx(&mut scenario, BUYER);
+        {
+            let mut registry = ts::take_shared<WalMarketRegistry>(&scenario);
+            let mut listing = ts::take_shared<MemoryListing>(&scenario);
+            let payment = coin::mint_for_testing<SUI>(10_000_000u64, ts::ctx(&mut scenario));
+            walmarket::pay_per_query(
+                &mut registry, &mut listing, payment, string::utf8(b"Anything else?"), &clock, ts::ctx(&mut scenario),
+            );
+            assert!(walmarket::registry_volume(&registry) == 20_000_000u64, 82);
+            ts::return_shared(registry);
+            ts::return_shared(listing);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = 14)] // EQueryPriceNotSet
+    fun test_pay_per_query_fails_when_price_not_set() {
+        let mut scenario = ts::begin(SELLER);
+        { walmarket::init_for_testing(ts::ctx(&mut scenario)); };
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        make_listing(&mut scenario, &clock); // price_per_query_mist defaults to none
+
+        ts::next_tx(&mut scenario, BUYER);
+        {
+            let mut registry = ts::take_shared<WalMarketRegistry>(&scenario);
+            let mut listing = ts::take_shared<MemoryListing>(&scenario);
+            let payment = coin::mint_for_testing<SUI>(10_000_000u64, ts::ctx(&mut scenario));
+            walmarket::pay_per_query(
+                &mut registry, &mut listing, payment, string::utf8(b"q"), &clock, ts::ctx(&mut scenario),
+            );
+            ts::return_shared(registry);
+            ts::return_shared(listing);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = 5)] // EInsufficientPayment
+    fun test_pay_per_query_fails_for_insufficient_payment() {
+        let mut scenario = ts::begin(SELLER);
+        { walmarket::init_for_testing(ts::ctx(&mut scenario)); };
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        make_listing_with_query_price(&mut scenario, &clock, option::some(10_000_000u64));
+
+        ts::next_tx(&mut scenario, BUYER);
+        {
+            let mut registry = ts::take_shared<WalMarketRegistry>(&scenario);
+            let mut listing = ts::take_shared<MemoryListing>(&scenario);
+            let payment = coin::mint_for_testing<SUI>(1_000_000u64, ts::ctx(&mut scenario)); // too little
+            walmarket::pay_per_query(
+                &mut registry, &mut listing, payment, string::utf8(b"q"), &clock, ts::ctx(&mut scenario),
+            );
+            ts::return_shared(registry);
+            ts::return_shared(listing);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    // ─── Test: submit_review requires holding a matching RentAccess ──────────
+
+    #[test]
+    fun test_submit_review_succeeds_and_updates_rating() {
+        let mut scenario = ts::begin(SELLER);
+        { walmarket::init_for_testing(ts::ctx(&mut scenario)); };
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        make_listing(&mut scenario, &clock);
+
+        ts::next_tx(&mut scenario, BUYER);
+        {
+            let mut registry = ts::take_shared<WalMarketRegistry>(&scenario);
+            let mut listing = ts::take_shared<MemoryListing>(&scenario);
+            let payment = coin::mint_for_testing<SUI>(1_000_000_000u64, ts::ctx(&mut scenario));
+            walmarket::purchase_listing_with_access(
+                &mut registry, &mut listing, payment, vector[1u8], &clock, ts::ctx(&mut scenario),
+            );
+            ts::return_shared(registry);
+            ts::return_shared(listing);
+        };
+
+        ts::next_tx(&mut scenario, BUYER);
+        {
+            let mut listing = ts::take_shared<MemoryListing>(&scenario);
+            let access = ts::take_from_sender<RentAccess>(&scenario);
+            walmarket::submit_review(
+                &mut listing, &access, 5u8, string::utf8(b"Great memory, very accurate"), &clock, ts::ctx(&mut scenario),
+            );
+            assert!(walmarket::listing_rating_sum(&listing) == 5, 90);
+            assert!(walmarket::listing_review_count(&listing) == 1, 91);
+            ts::return_to_sender(&scenario, access);
+            ts::return_shared(listing);
+        };
+
+        ts::next_tx(&mut scenario, BUYER);
+        {
+            let review = ts::take_shared<Review>(&scenario);
+            assert!(walmarket::review_rating(&review) == 5u8, 92);
+            ts::return_shared(review);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = 16)] // ENotAccessHolder
+    fun test_submit_review_fails_for_non_access_holder() {
+        let mut scenario = ts::begin(SELLER);
+        { walmarket::init_for_testing(ts::ctx(&mut scenario)); };
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        make_listing(&mut scenario, &clock);
+
+        ts::next_tx(&mut scenario, BUYER);
+        {
+            let mut registry = ts::take_shared<WalMarketRegistry>(&scenario);
+            let mut listing = ts::take_shared<MemoryListing>(&scenario);
+            let payment = coin::mint_for_testing<SUI>(1_000_000_000u64, ts::ctx(&mut scenario));
+            walmarket::purchase_listing_with_access(
+                &mut registry, &mut listing, payment, vector[1u8], &clock, ts::ctx(&mut scenario),
+            );
+            ts::return_shared(registry);
+            ts::return_shared(listing);
+        };
+
+        // SELLER never bought/rented this listing — has no RentAccess of their own,
+        // so this test simulates the only way to even attempt the call: using the
+        // buyer's access object but signing as someone else.
+        ts::next_tx(&mut scenario, BUYER);
+        {
+            let mut listing = ts::take_shared<MemoryListing>(&scenario);
+            let access = ts::take_from_sender<RentAccess>(&scenario);
+            ts::next_tx(&mut scenario, SELLER);
+            walmarket::submit_review(
+                &mut listing, &access, 5u8, string::utf8(b"not actually mine"), &clock, ts::ctx(&mut scenario),
+            );
+            ts::return_to_address(BUYER, access);
+            ts::return_shared(listing);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = 15)] // EInvalidRating
+    fun test_submit_review_fails_for_invalid_rating() {
+        let mut scenario = ts::begin(SELLER);
+        { walmarket::init_for_testing(ts::ctx(&mut scenario)); };
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        make_listing(&mut scenario, &clock);
+
+        ts::next_tx(&mut scenario, BUYER);
+        {
+            let mut registry = ts::take_shared<WalMarketRegistry>(&scenario);
+            let mut listing = ts::take_shared<MemoryListing>(&scenario);
+            let payment = coin::mint_for_testing<SUI>(1_000_000_000u64, ts::ctx(&mut scenario));
+            walmarket::purchase_listing_with_access(
+                &mut registry, &mut listing, payment, vector[1u8], &clock, ts::ctx(&mut scenario),
+            );
+            ts::return_shared(registry);
+            ts::return_shared(listing);
+        };
+
+        ts::next_tx(&mut scenario, BUYER);
+        {
+            let mut listing = ts::take_shared<MemoryListing>(&scenario);
+            let access = ts::take_from_sender<RentAccess>(&scenario);
+            walmarket::submit_review(
+                &mut listing, &access, 6u8, string::utf8(b"out of range"), &clock, ts::ctx(&mut scenario),
+            );
+            ts::return_to_sender(&scenario, access);
+            ts::return_shared(listing);
         };
 
         clock::destroy_for_testing(clock);
