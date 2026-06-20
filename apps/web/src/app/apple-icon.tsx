@@ -1,0 +1,31 @@
+import { ImageResponse } from 'next/og';
+
+export const size = { width: 180, height: 180 };
+export const contentType = 'image/png';
+
+const SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#10b981"/>
+      <stop offset="1" stop-color="#8b5cf6"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" fill="#020817"/>
+  <path d="M14 18 L22 46 L32 26 L42 46 L50 18" fill="none" stroke="url(#g)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="14" cy="18" r="3.4" fill="#fff"/>
+  <circle cx="22" cy="46" r="3.4" fill="#fff"/>
+  <circle cx="32" cy="26" r="3.4" fill="#fff"/>
+  <circle cx="42" cy="46" r="3.4" fill="#fff"/>
+  <circle cx="50" cy="18" r="3.4" fill="#fff"/>
+</svg>`;
+
+const DATA_URI = `data:image/svg+xml;base64,${Buffer.from(SVG).toString('base64')}`;
+
+export default function AppleIcon() {
+  return new ImageResponse(
+    (
+      <img src={DATA_URI} width={size.width} height={size.height} alt="WalMarket" />
+    ),
+    { ...size },
+  );
+}
