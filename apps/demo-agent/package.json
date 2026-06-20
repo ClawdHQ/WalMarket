@@ -1,0 +1,27 @@
+{
+  "name": "@walmarket/demo-agent",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "create-account": "tsx src/create-memwal-account.ts",
+    "seed": "tsx src/seeder.ts",
+    "query-responder": "tsx src/query-responder.ts",
+    "rental-key-manager": "tsx src/rental-key-manager.ts",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@mysten/sui": "^1.x",
+    "@mysten/seal": "^0.x",
+    "@mysten/walrus": "^0.x",
+    "@mysten-incubation/memwal": "latest",
+    "@walmarket/sdk": "workspace:*",
+    "dotenv": "^16.x",
+    "ai": "^3.x",
+    "@ai-sdk/openai": "^0.x"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "tsx": "^4.x",
+    "@types/node": "^20"
+  }
+}
