@@ -1,0 +1,44 @@
+{
+  "name": "@walmarket/web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "deploy:walrus": "next build && site-builder publish ./out --epochs 10"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^0.x",
+    "@mysten-incubation/memwal": "latest",
+    "@mysten/dapp-kit": "^0.x",
+    "@mysten/enoki": "0.9.1",
+    "@mysten/seal": "^0.x",
+    "@mysten/sui": "^1.x",
+    "@mysten/walrus": "^0.x",
+    "@tanstack/react-query": "^5.x",
+    "@walmarket/sdk": "workspace:*",
+    "ai": "^3.x",
+    "better-sqlite3": "^12.11.1",
+    "clsx": "^2.x",
+    "date-fns": "^3.x",
+    "lucide-react": "^1.18.0",
+    "next": "14.2.x",
+    "react": "^18",
+    "react-dom": "^18",
+    "react-markdown": "^9.x",
+    "tailwind-merge": "^2.x",
+    "zustand": "^4.x"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "autoprefixer": "^10",
+    "postcss": "^8",
+    "tailwindcss": "^3",
+    "typescript": "^5.4.0"
+  }
+}
