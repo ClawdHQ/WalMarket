@@ -1,0 +1,22 @@
+node_modules/
+.next/
+dist/
+out/
+.env
+.env.local
+*.local
+build/
+*.tsbuildinfo
+.DS_Store
+.claude/
+
+# Sui build artifacts
+packages/contracts/build/
+packages/contracts/.move/
+
+# Managed-seller key store (encrypted, but never commit the DB file itself)
+apps/web/.data/
+
+# Never commit raw key material, however it ends up at the repo root
+# (e.g. stray files Sui tooling sometimes drops, named by address: 0x....key)
+*.key

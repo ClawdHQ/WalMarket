@@ -1,0 +1,33 @@
+{
+  "name": "walmarket",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter @walmarket/web dev",
+    "build": "pnpm --filter @walmarket/sdk build && pnpm --filter @walmarket/web build",
+    "seed": "pnpm --filter @walmarket/demo-agent seed",
+    "query-responder": "pnpm --filter @walmarket/demo-agent query-responder",
+    "rental-key-manager": "pnpm --filter @walmarket/demo-agent rental-key-manager",
+    "agent": "pnpm --filter @walmarket/demo-agent start",
+    "test:contracts": "cd packages/contracts && sui move test",
+    "publish:contracts": "cd packages/contracts && sui client publish --gas-budget 100000000",
+    "deploy:walrus": "pnpm --filter @walmarket/web deploy:walrus",
+    "install:all": "pnpm install"
+  },
+  "devEngines": {
+    "node": ">=20"
+  },
+  "pnpm": {
+    "overrides": {
+      "@mysten/enoki>@mysten/sui": "^1.36.0"
+    },
+    "peerDependencyRules": {
+      "ignoreMissing": [],
+      "allowedVersions": {
+        "@mysten-incubation/memwal>@mysten/sui": "*",
+        "@mysten-incubation/memwal>@mysten/seal": "*",
+        "@mysten-incubation/memwal>@mysten/walrus": "*",
+        "@mysten-incubation/memwal>ai": "*"
+      }
+    }
+  }
+}
