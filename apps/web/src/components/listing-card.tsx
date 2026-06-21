@@ -1,7 +1,7 @@
 'use client';
 import Link from 'next/link';
 import { clsx } from 'clsx';
-import { Brain, ArrowRight, Clock } from 'lucide-react';
+import { Brain, ArrowRight, Clock, Star } from 'lucide-react';
 import { CATEGORIES, CATEGORY_COLORS } from '@/lib/constants';
 import { formatSui, formatEpochAge, formatAddress } from '@/lib/format';
 import type { MemoryListing } from '@walmarket/sdk';
@@ -21,9 +21,17 @@ export function ListingCard({ listing }: { listing: MemoryListing }) {
       {/* Category + memory count row */}
       <div className="flex items-center justify-between gap-2">
         <span className={clsx('badge', catColor)}>{cat}</span>
-        <div className="flex items-center gap-1 text-xs text-slate-500">
-          <Brain size={11} />
-          <span className="font-tabular">{listing.memoryCount.toLocaleString()}</span>
+        <div className="flex items-center gap-2 text-xs text-slate-500">
+          {listing.reviewCount > 0 && (
+            <span className="flex items-center gap-0.5">
+              <Star size={10} className="text-yellow-400 fill-yellow-400" />
+              {(listing.ratingSum / listing.reviewCount).toFixed(1)}
+            </span>
+          )}
+          <div className="flex items-center gap-1">
+            <Brain size={11} />
+            <span className="font-tabular">{listing.memoryCount.toLocaleString()}</span>
+          </div>
         </div>
       </div>
 

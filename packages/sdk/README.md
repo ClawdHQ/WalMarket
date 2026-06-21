@@ -23,7 +23,9 @@ const { digest, listingId } = await client.createListing(signer, { ...params });
 await client.setOperator(signer, listingId, agentAddress);
 ```
 
-Key methods: `getAllListings`, `getListingById`, `getMyListings`, `getMyRentals`, `createListing`, `updatePricing`, `setOperator`, `delist`, `purchaseListing`, `purchaseListingWithAccess`, `rentListing`, `confirmRent`, `expireRent`, `requestQuery`, `submitQueryResponse`, `getQueryResponse`, `getFreeQueriesUsed`, `getRegistryStats`.
+Key methods: `getAllListings`, `getListingById`, `getMyListings`, `getMyRentals`, `createListing`, `updatePricing`, `setOperator`, `delist`, `purchaseListing`, `purchaseListingWithAccess`, `rentListing`, `confirmRent`, `expireRent`, `requestQuery`, `payPerQuery`, `submitQueryResponse`, `getQueryResponse`, `getFreeQueriesUsed`, `submitReview`, `getReviewsForListing`, `getRegistryStats`.
+
+`payPerQuery(signer, listingId, message, priceMist)` is the streaming/unlimited counterpart to `requestQuery` — pays `listing.pricePerQueryMist` per message instead of relying on the one free trial, reusing the exact same `QueryRequest`/`QueryRequested` pathway so `startQueryResponder` (below) answers it identically. `submitReview(signer, listingId, accessId, rating, comment)` only succeeds if `accessId` is a `RentAccess` the signer actually holds for that listing — see `packages/contracts/README.md`'s `ENotAccessHolder`.
 
 **Dual package-ID pattern**: `packageId` (original — required for event/struct type queries, since Sui ties type identity to the *defining* package forever) vs. `latestPackageId` (changes on every `sui client upgrade` — required for moveCall targets needing post-upgrade function behavior). See [`packages/contracts/README.md`](../contracts/README.md#deploying).
 
@@ -63,6 +65,8 @@ try {
 ```
 
 This is the x402-style pattern: an unpaid request doesn't just fail, it returns structured payment instructions an agent can act on programmatically. See [`apps/web/README.md`](../../apps/web/README.md#agent-native-api) for the full endpoint list and a 7-step worked example.
+
+`AgentClient.discover({ need, limit })` is the agent-to-agent discovery layer — describe what you need in plain language and get back active listings ranked by relevance (`SerializedListing & { relevanceScore }`), with each listing's `averageRating`/`reviewCount` included so an agent can weigh reputation alongside relevance itself. `PaymentDetails.payPerQuery` (on the result of `getListing`) is the streaming-pricing counterpart to `PaymentDetails.query` — `null` if the seller hasn't opted in, otherwise the move-call details for unlimited pay-per-message access.
 
 ### `SealAccess` (`seal-access.ts`)
 

@@ -25,6 +25,7 @@
     "@mysten-incubation/memwal": "latest"
   },
   "devDependencies": {
+    "@types/node": "^20",
     "typescript": "^5.4.0"
   }
 }

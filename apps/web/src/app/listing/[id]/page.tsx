@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { clsx } from 'clsx';
 import {
   ChevronRight, Brain, Calendar, Hash, User, ExternalLink,
-  ShoppingCart, Loader2, AlertCircle, CheckCircle2, Copy, Check, ArrowLeft,
+  ShoppingCart, Loader2, AlertCircle, CheckCircle2, Copy, Check, ArrowLeft, Star,
 } from 'lucide-react';
 import { useZkLogin } from '@/hooks/use-zk-login';
 import { getWalMarketClient } from '@/lib/sui-client';
@@ -41,6 +41,62 @@ function CopyText({ value, display }: { value: string; display?: string }) {
       <span>{display ?? value}</span>
       {copied ? <Check size={11} className="text-brand-400" /> : <Copy size={11} className="text-slate-600" />}
     </button>
+  );
+}
+
+// On-chain reputation: only callable with a real RentAccess (accessId), so this
+// can only ever appear for someone who actually just bought — see submit_review's
+// ENotAccessHolder guard in the Move contract.
+function ReviewBox({ signer, listingId, accessId }: { signer: NonNullable<ReturnType<typeof useZkLogin>['signer']>; listingId: string; accessId: string }) {
+  const [rating, setRating] = useState(0);
+  const [comment, setComment] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+
+  if (submitted) {
+    return (
+      <p className="text-xs text-brand-400 flex items-center gap-1.5">
+        <Check size={12} /> Thanks — your review is on-chain.
+      </p>
+    );
+  }
+
+  async function submit() {
+    if (rating === 0) { setReviewError('Pick a star rating first'); return; }
+    setSubmitting(true);
+    setReviewError(null);
+    try {
+      await getWalMarketClient().submitReview(signer, listingId, accessId, rating, comment.trim());
+      setSubmitted(true);
+    } catch (e) {
+      setReviewError(e instanceof Error ? e.message : 'Failed to submit review');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-1">
+        {[1, 2, 3, 4, 5].map(n => (
+          <button key={n} type="button" onClick={() => setRating(n)} className="p-0.5">
+            <Star size={16} className={n <= rating ? 'text-yellow-400 fill-yellow-400' : 'text-slate-600'} />
+          </button>
+        ))}
+      </div>
+      <textarea
+        rows={2}
+        className="input resize-none text-xs"
+        placeholder="Optional — what did this memory get right (or wrong)?"
+        value={comment}
+        onChange={e => setComment(e.target.value)}
+      />
+      {reviewError && <p className="text-red-400 text-xs">{reviewError}</p>}
+      <button onClick={() => void submit()} disabled={submitting} className="btn-secondary text-xs w-full">
+        {submitting ? <><Loader2 size={12} className="animate-spin" /> Submitting…</> : 'Submit review on-chain'}
+      </button>
+    </div>
   );
 }
 
@@ -144,6 +200,13 @@ export default function ListingDetailPage() {
               {purchaseResult && (
                 <span className="badge-brand">Purchased</span>
               )}
+              {listing.reviewCount > 0 && (
+                <span className="badge-gray flex items-center gap-1">
+                  <Star size={10} className="text-yellow-400 fill-yellow-400" />
+                  {(listing.ratingSum / listing.reviewCount).toFixed(1)}
+                  <span className="text-slate-500">({listing.reviewCount})</span>
+                </span>
+              )}
             </div>
 
             {/* Title + description */}
@@ -205,7 +268,7 @@ export default function ListingDetailPage() {
 
         {/* Center: Query */}
         <div className="lg:col-span-1">
-          <QueryWidget listingId={listing.id} />
+          <QueryWidget listingId={listing.id} pricePerQueryMist={listing.pricePerQueryMist} />
         </div>
 
         {/* Right: Purchase */}
@@ -313,6 +376,14 @@ export default function ListingDetailPage() {
             listingTitle: listing.title,
             memoryCount: listing.memoryCount,
           }} />
+        </div>
+      )}
+
+      {/* ── Leave a review — shown after purchase ───────────────── */}
+      {purchaseResult && signer && (
+        <div className="card p-5 max-w-md space-y-3">
+          <h3 className="text-white font-semibold text-sm">Rate this memory</h3>
+          <ReviewBox signer={signer} listingId={listing.id} accessId={purchaseResult.accessId} />
         </div>
       )}
     </div>

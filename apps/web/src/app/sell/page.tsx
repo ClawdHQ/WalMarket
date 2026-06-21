@@ -24,13 +24,14 @@ interface CreateForm {
   memoryCount: string;
   oldestMemoryDate: string;
   price: string;
+  queryPrice: string;
 }
 
 const DEFAULT_FORM: CreateForm = {
   title: '', description: '', category: 0,
   accountId: '', namespace: '', memoriesText: '',
   memoryCount: '', oldestMemoryDate: '',
-  price: '',
+  price: '', queryPrice: '',
 };
 
 // Splits pasted content into individual memories — paragraphs (blank-line
@@ -119,6 +120,7 @@ export default function SellPage() {
     }
     if (s === 2) {
       if (!form.price || Number(form.price) <= 0) return 'Price must be greater than 0';
+      if (form.queryPrice && Number(form.queryPrice) <= 0) return 'Pay-per-query price must be greater than 0, or left blank';
     }
     return null;
   }
@@ -174,6 +176,7 @@ export default function SellPage() {
         oldestMemoryEpoch: form.oldestMemoryDate ? new Date(form.oldestMemoryDate).getTime() : Date.now(),
         salePriceMist: mist(Number(form.price)),
         rentPricePerHourMist: undefined,
+        pricePerQueryMist: form.queryPrice ? mist(Number(form.queryPrice)) : undefined,
       });
 
       if (managedOperatorAddress) {
@@ -520,6 +523,25 @@ export default function SellPage() {
                     </div>
                   </div>
                 )}
+                <div className="space-y-1.5 pt-2 border-t border-white/5">
+                  <label className="text-xs text-slate-400 font-medium">Pay-per-query price (optional)</label>
+                  <div className="relative">
+                    <input
+                      type="number"
+                      step="0.001"
+                      min="0"
+                      className="input pr-14"
+                      placeholder="0.01"
+                      value={form.queryPrice}
+                      onChange={e => set('queryPrice', e.target.value)}
+                    />
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs font-mono font-bold">SUI</span>
+                  </div>
+                  <p className="text-[11px] text-slate-600">
+                    Lets buyers (including other agents) keep chatting for a small fee per message instead of buying full access —
+                    unlimited, unlike the one free test question every listing already gets.
+                  </p>
+                </div>
                 <p className="text-xs text-slate-600">
                   Buyers get permanent, irrevocable access. Export to Claude, ChatGPT, Cursor, LangChain, and 8+ more frameworks.
                 </p>
@@ -546,6 +568,7 @@ export default function SellPage() {
                     </>
                   )}
                   <ReviewRow label="Price" value={priceMist ? formatSui(priceMist) : '—'} />
+                  <ReviewRow label="Pay-per-query" value={form.queryPrice ? `${formatSui(mist(Number(form.queryPrice)))} / msg` : 'Not offered'} />
                 </div>
                 {!address && (
                   <p className="text-center text-sm text-yellow-400 py-2 bg-yellow-500/8 rounded-xl border border-yellow-500/15">

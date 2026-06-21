@@ -20,8 +20,12 @@ function serialize(l: MemoryListing) {
     salePriceSui: l.salePriceMist ? (Number(l.salePriceMist) / 1e9).toFixed(4) : null,
     rentPricePerHourMist: l.rentPricePerHourMist?.toString() ?? null,
     rentPricePerHourSui: l.rentPricePerHourMist ? (Number(l.rentPricePerHourMist) / 1e9).toFixed(4) : null,
+    pricePerQueryMist: l.pricePerQueryMist?.toString() ?? null,
+    pricePerQuerySui: l.pricePerQueryMist ? (Number(l.pricePerQueryMist) / 1e9).toFixed(4) : null,
     isActive: l.isActive,
     createdAt: l.createdAt,
+    reviewCount: l.reviewCount,
+    averageRating: l.reviewCount > 0 ? Math.round((l.ratingSum / l.reviewCount) * 10) / 10 : null,
   };
 }
 
@@ -62,6 +66,7 @@ export async function GET(req: NextRequest) {
           rpc: AGENT_API_RPC,
           accessEndpoint: '/api/agent/access',
           recallEndpoint: '/api/agent/recall',
+          discoverEndpoint: '/api/agent/discover?need=<plain language description>',
         },
       },
       {

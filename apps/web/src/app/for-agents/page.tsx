@@ -4,6 +4,14 @@ import {
   Terminal, Lock, Globe, Database, Cpu, Code2, MessageSquare,
 } from 'lucide-react';
 
+const CODE_DISCOVER = `// Step 0 (optional) — describe what you need instead of browsing by hand.
+// Relevance is keyword/category overlap against title+description+category,
+// with a small on-chain-reputation tie-breaker — inspectable, not a black box.
+const res = await fetch('https://walmarket.app/api/agent/discover?need=' +
+  encodeURIComponent('Sui DeFi liquidity research'));
+const { results } = await res.json();
+// results[0] → { id, title, relevanceScore: 8.3, averageRating: 4.6, reviewCount: 12, ... }`;
+
 const CODE_BROWSE = `// Step 1 — browse without any auth or sign-up
 const res = await fetch('https://walmarket.app/api/agent/listings?category=1&limit=10');
 const { listings, _meta } = await res.json();
@@ -113,6 +121,32 @@ await walmarket.setOperator(agentSigner, listingId, agentSigner.getAddress());
 startQueryResponder({ network, packageId, registryId, memwalRelayerUrl, agentPrivateKey });
 startRentalKeyManager({ network, packageId, memwalPackageId, memwalAccountId, memwalPrivateKey });`;
 
+const CODE_PAYPERQUERY = `// Streaming/pay-per-query — unlimited, no purchase required. Good fit for
+// agent-to-agent usage that wants to keep paying small amounts as it goes
+// instead of buying full access up front. null in payment.payPerQuery means
+// this seller hasn't opted in (they can via the Sell page's pricing step).
+if (payment.payPerQuery) {
+  const tx = new Transaction();
+  const [coin] = tx.splitCoins(tx.gas, [tx.pure.u64(payment.payPerQuery.pricePerQueryMist)]);
+  tx.moveCall({
+    target: payment.payPerQuery.moveCallTarget,
+    arguments: [
+      tx.object(payment.registryId),
+      tx.object(payment.listingId),
+      coin,
+      tx.pure.string('What changed in this market this week?'),
+      tx.object('0x6'),
+    ],
+  });
+  const { events } = await client.signAndExecuteTransaction({
+    signer: agentWallet, transaction: tx, options: { showEvents: true },
+  });
+  const queryId = events.find(e => e.type.endsWith('::QueryRequested'))!.parsedJson.query_id;
+  // Poll /api/agent/query/:id exactly like the free test-query flow above —
+  // same QueryRequest/QueryRequested pathway, the seller's agent doesn't
+  // know or care whether you paid per-message or used your free question.
+}`;
+
 const CODE_402 = `// When you POST without a txDigest, you get a structured 402 — x402-style
 const res = await fetch('/api/agent/access', {
   method: 'POST',
@@ -135,6 +169,12 @@ const gate = await res.json();
 const API_ENDPOINTS = [
   {
     method: 'GET',
+    path: '/api/agent/discover',
+    desc: 'Describe what you need in plain language (?need=...) — get back active listings ranked by relevance, with on-chain reputation as a tie-breaker.',
+    auth: 'None',
+  },
+  {
+    method: 'GET',
     path: '/api/agent/listings',
     desc: 'Browse all active listings. Supports ?category=0-4, ?limit, ?cursor.',
     auth: 'None',
@@ -142,7 +182,7 @@ const API_ENDPOINTS = [
   {
     method: 'GET',
     path: '/api/agent/listings/:id',
-    desc: 'Get a single listing with full payment instruction object.',
+    desc: 'Get a single listing with full payment instruction object — purchase, rent, free test query, and (if the seller opted in) unlimited payPerQuery.',
     auth: 'None',
   },
   {
@@ -178,11 +218,13 @@ const COMPARISON = [
 ];
 
 const STEPS = [
+  { icon: Globe,         label: '00', title: 'Discover',        desc: 'GET /api/agent/discover?need=... — describe what you need in plain language, get back ranked listings. No human curating which listing matches which need.' },
   { icon: Database,      label: '01', title: 'Browse listings', desc: 'GET /api/agent/listings — no auth, no rate limit. Returns live on-chain listings with payment details.' },
   { icon: MessageSquare, label: '02', title: 'Test for free',   desc: '1 free message per listing. Submit request_query, poll /api/agent/query/:id for a real AI-generated answer.' },
   { icon: Cpu,           label: '03', title: 'Pay on-chain',    desc: 'Generate a delegate keypair. Submit purchase_listing_with_access tx. 2 SUI, permanent ownership.' },
   { icon: Lock,          label: '04', title: 'Verify access',   desc: 'POST txDigest → /api/agent/access. On-chain proof verified server-side. Get namespace + accountId.' },
   { icon: Terminal,      label: '05', title: 'Query forever',   desc: 'POST /api/agent/recall with your delegate key. Cryptographically gated, Walrus-backed recall.' },
+  { icon: Zap,           label: '06', title: 'Or pay per query', desc: "Don't want full access? Call pay_per_query for a flat micropayment per message instead — unlimited, no purchase required." },
 ];
 
 export default function ForAgentsPage() {
@@ -325,12 +367,14 @@ export default function ForAgentsPage() {
 
         <div className="space-y-3">
           {[
+            { label: '0 · Discover',            file: 'discover.ts',   code: CODE_DISCOVER },
             { label: '1 · Browse listings',     file: 'browse.ts',     code: CODE_BROWSE },
             { label: '2 · Get payment info',    file: 'details.ts',    code: CODE_DETAIL },
             { label: '3 · Test for free',       file: 'test-query.ts', code: CODE_TESTQUERY },
             { label: '4–5 · Pay on-chain',      file: 'purchase.ts',   code: CODE_PURCHASE },
             { label: '6 · Verify access',       file: 'access.ts',     code: CODE_ACCESS },
             { label: '7 · Query memory',        file: 'recall.ts',     code: CODE_RECALL },
+            { label: '8 · Or pay per query',    file: 'pay-per-query.ts', code: CODE_PAYPERQUERY },
           ].map(({ label, file, code }) => (
             <div key={file} className="card overflow-hidden">
               <div className="flex items-center gap-2 px-4 py-2.5 border-b border-white/6 bg-dark-900/50">

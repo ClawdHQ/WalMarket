@@ -1,18 +1,20 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { clsx } from 'clsx';
-import { MessageSquare, Loader2, AlertCircle, Send, Sparkles, ShoppingCart } from 'lucide-react';
+import { MessageSquare, Loader2, AlertCircle, Send, Sparkles, ShoppingCart, Coins } from 'lucide-react';
 import { QUERY_TIMEOUT_MS, MAX_FREE_QUERIES } from '@/lib/constants';
 import { getWalMarketClient } from '@/lib/sui-client';
 import { useZkLogin } from '@/hooks/use-zk-login';
+import { formatSui } from '@/lib/format';
 
 interface Turn {
   message: string;
   answer: string | null;
   failed?: boolean;
+  paid?: boolean;
 }
 
-export function QueryWidget({ listingId }: { listingId: string }) {
+export function QueryWidget({ listingId, pricePerQueryMist }: { listingId: string; pricePerQueryMist: bigint | null }) {
   const { address, signer } = useZkLogin();
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState('');
@@ -26,23 +28,29 @@ export function QueryWidget({ listingId }: { listingId: string }) {
   }, [address, listingId]);
 
   const capReached = used !== null && used >= MAX_FREE_QUERIES;
+  // Once the free question is spent, streaming/pay-per-query keeps the
+  // conversation going (unlimited) for sellers who opted into it on /sell —
+  // otherwise the only path forward is buying full access.
+  const canPayPerMessage = capReached && pricePerQueryMist !== null;
 
   async function sendMessage() {
     const message = input.trim();
     if (!signer || !address) { setError('Sign in with Google to ask this memory a question'); return; }
     if (!message) return;
-    if (capReached) return;
+    if (capReached && !canPayPerMessage) return;
 
     setInput('');
     setError(null);
     setLoading(true);
     const turnIndex = turns.length;
-    setTurns(prev => [...prev, { message, answer: null }]);
+    setTurns(prev => [...prev, { message, answer: null, paid: canPayPerMessage }]);
 
     try {
       const client = getWalMarketClient();
-      const { queryId } = await client.requestQuery(signer, listingId, message);
-      setUsed(u => (u ?? 0) + 1);
+      const { queryId } = canPayPerMessage
+        ? await client.payPerQuery(signer, listingId, message, pricePerQueryMist as bigint)
+        : await client.requestQuery(signer, listingId, message);
+      if (!canPayPerMessage) setUsed(u => (u ?? 0) + 1);
 
       const start = Date.now();
       while (Date.now() - start < QUERY_TIMEOUT_MS) {
@@ -84,6 +92,12 @@ export function QueryWidget({ listingId }: { listingId: string }) {
         )}
       </div>
 
+      {canPayPerMessage && (
+        <p className="text-[10px] text-brand-400 flex items-center gap-1 -mt-2">
+          <Coins size={10} /> Free question used — {formatSui(pricePerQueryMist as bigint)} per message to keep chatting, unlimited
+        </p>
+      )}
+
       {/* Thread */}
       <div className="flex-1 space-y-3 overflow-y-auto max-h-72 min-h-[80px]">
         {turns.length === 0 && (
@@ -93,7 +107,8 @@ export function QueryWidget({ listingId }: { listingId: string }) {
         )}
         {turns.map((t, i) => (
           <div key={i} className="space-y-1.5 animate-fade-in">
-            <div className="flex justify-end">
+            <div className="flex justify-end items-center gap-1.5">
+              {t.paid && <Coins size={10} className="text-brand-500 flex-shrink-0" />}
               <p className="bg-accent-500/15 text-accent-100 text-xs rounded-xl rounded-br-sm px-3 py-2 max-w-[85%]">
                 {t.message}
               </p>
@@ -118,7 +133,7 @@ export function QueryWidget({ listingId }: { listingId: string }) {
       </div>
 
       {/* Cap reached CTA */}
-      {capReached ? (
+      {capReached && !canPayPerMessage ? (
         <div className="rounded-xl border border-brand-500/20 bg-brand-500/8 p-3 text-center space-y-1">
           <p className="text-xs text-slate-300">You've used all {MAX_FREE_QUERIES} free questions for this listing.</p>
           <p className="text-[11px] text-brand-400 flex items-center justify-center gap-1">
@@ -129,7 +144,7 @@ export function QueryWidget({ listingId }: { listingId: string }) {
         <div className="flex gap-2">
           <input
             className="input h-9 text-sm flex-1"
-            placeholder="Ask something this memory might know…"
+            placeholder={canPayPerMessage ? `Ask anything — ${formatSui(pricePerQueryMist as bigint)} per message…` : 'Ask something this memory might know…'}
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter' && !loading) void sendMessage(); }}

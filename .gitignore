@@ -9,6 +9,7 @@ build/
 *.tsbuildinfo
 .DS_Store
 .claude/
+.vercel
 
 # Sui build artifacts
 packages/contracts/build/
