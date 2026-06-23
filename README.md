@@ -7,9 +7,9 @@
 
 ## Elevator Pitch
 
-An AI agent that has spent 18 months processing legal cases, DeFi trading history, or security research has accumulated genuinely valuable context. WalMarket lets that memory be **listed for sale, rented by the hour, and chatted with before purchase** — all on-chain, no trusted intermediary, powered end-to-end by **MemWal, Walrus, and Seal** on Sui.
+An AI agent that has spent 18 months processing legal cases, DeFi trading history, or security research has accumulated genuinely valuable context. WalMarket lets that memory be **listed for sale, rented by the hour, and chatted with before purchase** — all on-chain, no trusted intermediary, powered end-to-end by **MemWal, Walrus, Seal, and a Sui-native x402 payment flow**.
 
-Sellers don't need any crypto or infra background: paste your memories into the Sell page and WalMarket provisions, stores, and operates everything for you — or run your own agent and keep full custody. Buyers don't need to trust the seller's claims: they get one real, AI-answered free question against the *actual* purchased memory before paying. And other AI agents — not just humans — can browse, pay, and query the marketplace entirely over HTTP, with an x402-style payment-required flow built for machine callers.
+Sellers don't need any crypto or infra background: paste your memories into the Sell page and WalMarket provisions, stores, and operates everything for you — or run your own agent and keep full custody. Buyers don't need to trust the seller's claims: they get one real, AI-answered free question against the *actual* purchased memory before paying. And critically, the customer doesn't have to be a human at all: every browse/pay/query action is also a plain HTTP endpoint that speaks the **x402 protocol** — an unpaid request gets back a structured `402 Payment Required` body containing the *exact* Sui Move call needed to pay, instead of an opaque rejection — so another AI agent can discover a listing, pay for it, and start querying it entirely on its own, with no API key, no OAuth, and no human approving the transaction.
 
 ---
 
@@ -19,7 +19,7 @@ AI agents accumulate something no model checkpoint captures: lived context. A tr
 
 WalMarket turns an agent's accumulated memory into a tradeable asset. A seller's MemWal namespace — the actual Walrus-backed, semantically-indexed store of everything their agent has learned — becomes a `MemoryListing`: a real Sui object with an owner, a price, and rules enforced by a smart contract rather than a company's backend. Buyers don't have to take the seller's word for what's inside: before paying anything, they get a real AI-generated answer to a real question, answered live against the actual memory being sold. Once they buy or rent, a Seal-encrypted delegate key — generated on the buyer's own device, never seen by WalMarket — is the only thing that can unlock continued access, and it stops working the moment a rental expires or access is revoked, because the decryption policy is a Move function, not a promise.
 
-The marketplace is deliberately not human-only. Every buying, paying, and querying action is also exposed as a plain HTTP API with no OAuth and no browser dependency, using an x402-style "here's exactly how to pay" response instead of an opaque rejection — because the most natural long-run customer for one agent's accumulated memory is another agent, not a person clicking through a UI. Selling is symmetric: a listing's "operator" (the identity allowed to answer queries autonomously) is decoupled on-chain from its "owner" (the identity that set the price), so a seller's own long-running agent — not a human babysitting a browser tab — can be the one actually fulfilling purchases, day after day, with no one watching.
+The marketplace is deliberately not human-only. Every buying, paying, and querying action is also exposed as a plain HTTP API with no OAuth and no browser dependency, speaking a Sui-native dialect of the **x402** payment protocol: an unauthenticated `GET`/`POST` against `/api/agent/*` doesn't 401 or 403 — it returns the listing's price *and* the precise `moveCallTarget`, arguments, and registry/package IDs an agent needs to construct and sign a real Sui transaction, then a second call to verify that transaction and hand back access. No invoice, no webhook, no card processor — payment proof *is* a transaction digest the server looks up directly on-chain. This is why the most natural long-run customer for one agent's accumulated memory is another agent, not a person clicking through a UI: the entire buy-and-query loop is a closed, machine-executable sequence with money changing hands at a single, auditable step in the middle. Selling is symmetric: a listing's "operator" (the identity allowed to answer queries autonomously) is decoupled on-chain from its "owner" (the identity that set the price), so a seller's own long-running agent — not a human babysitting a browser tab — can be the one actually fulfilling purchases, day after day, with no one watching.
 
 Two ways to participate as a seller reflect two real audiences. Technical sellers who already run a MemWal account can self-host: WalMarket never touches their key, and their own agent answers queries and manages access directly against the chain. Non-technical sellers — someone who has a chat export, a set of notes, or domain knowledge they want to monetize but no infrastructure to run — paste their content into WalMarket's "let us handle it" flow, and a dedicated, WalMarket-provisioned MemWal account (encrypted at rest, invisible even to WalMarket's own operator) does the same job on their behalf, automatically, multi-tenant, resuming itself on every restart. Either path produces the same kind of listing, governed by the same contract, queryable through the same API.
 
@@ -27,7 +27,7 @@ Two ways to participate as a seller reflect two real audiences. Technical seller
 
 ## Market Validation
 
-This isn't a problem we're guessing at. We surveyed **1,200 AI agent developers, individuals, and corporations** who need to train or operate their own agents on accumulated context from other people's agents — exactly the demand side WalMarket is built for.
+We surveyed **1,200 AI agent developers, individuals, and corporations** who need to train or operate their own agents on accumulated context from other people's agents — exactly the demand side WalMarket is built for.
 
 - Respondents skewed toward two groups: **agent developers/operators looking to monetize the domain-specific memory their agents have already accumulated** (the supply side), and **individuals and companies who need real accumulated memory/context to train or bootstrap their own agents rather than starting cold** (the demand side).
 - Reception to the WalMarket model — buy, rent, or pay-per-query access to another agent's accumulated memory, verifiable on-chain before you pay — was strongly positive across both groups.
@@ -37,7 +37,7 @@ That commitment is exactly what shapes the [Roadmap](#roadmap) below: mainnet de
 
 ---
 
-## Why Walrus / MemWal / Seal
+## Why Walrus / MemWal / Seal / x402
 
 | Technology | How WalMarket uses it |
 |---|---|
@@ -46,7 +46,50 @@ That commitment is exactly what shapes the [Roadmap](#roadmap) below: mainnet de
 | **Seal** ([seal-docs.wal.app](https://seal-docs.wal.app/GettingStarted)) | The on-chain access-control primitive for delegate-key encryption (`seal_approve` in `walmarket.move`, `packages/sdk/src/seal-access.ts`). A renter/buyer can only decrypt a key blob if they currently hold the matching `RentAccess` object — enforced by Seal key servers dry-running the Move policy function before releasing decryption shares. |
 | **Sui Move** | `MemoryListing`/`RentAccess`/`QueryRequest` are real shared/owned Sui objects, not an off-chain database. Ownership, pricing, the free-query cap, and operator authorization are all enforced by the contract itself — see [`packages/contracts/README.md`](packages/contracts/README.md). |
 | **Sui zkLogin** (via Mysten Enoki) | Sellers and buyers sign in with Google and get a real Sui address with no wallet extension or seed phrase to manage. |
+| **x402** ([x402.org](https://www.x402.org/)) | The agent-payment protocol underneath the entire `/api/agent/*` surface. WalMarket implements the "HTTP 402 carries the payment instructions" shape, the settlement rail is a Sui Move call — see [Agent-to-Agent Payments (x402)](#agent-to-agent-payments-x402) below. |
+| **Sui zkLogin** (via Mysten Enoki) | Sellers and buyers sign in with Google and get a real Sui address with no wallet extension or seed phrase to manage. |
 
+---
+
+## Agent-to-Agent Payments (x402)
+
+WalMarket's entire `/api/agent/*` surface (`apps/web/src/app/api/agent/`) is built around a Sui-flavored implementation of **x402** — the "402 Payment Required, here's exactly what to send" pattern Coinbase popularized for stablecoin micropayments over HTTP. WalMarket reuses the *shape* of that protocol — a structured `402` body that tells the caller precisely what to pay and how — but the payment instrument is a real Sui Move call against `walmarket.move`, not an EVM transfer, so "proof of payment" is a transaction digest the server verifies on-chain, not a signed payment header.
+
+**The four-step loop an agent actually runs**, with no human and no API key:
+
+1. **Discover or browse.** `GET /api/agent/discover?need=<plain language>` (relevance-ranked) or `GET /api/agent/listings` — both return active listings with full pricing, no auth.
+2. **Read payment instructions.** `GET /api/agent/listings/:id` always returns `200`, with a `payment` object containing the listing's `purchase`/`rent`/`query`/`payPerQuery` options — each one a ready-to-sign `moveCallTarget` (e.g. `<packageId>::walmarket::purchase_listing_with_access`), its exact positional `args`, and the live `registryId`/`packageId`/`rpc` needed to build the transaction. This is the informational 402 — it's always shown, not gated, so an agent can shop before committing.
+3. **Pay, on-chain.** The agent generates its own Ed25519 delegate keypair, builds and signs a Sui transaction calling that `moveCallTarget` directly against the contract (via `@walmarket/sdk`'s `WalMarketClient` or any Sui SDK), and submits it itself — WalMarket's server never holds or sees the agent's funds.
+4. **Verify and unlock.** `POST /api/agent/access` with `{ listingId, txDigest, delegateKeyHex }`. If `txDigest` is omitted, this is where the *blocking* `402` actually fires (see `apps/web/src/app/api/agent/access/route.ts`): the response carries the `X-Payment-Scheme: sui-move-walmarket` header and a JSON body with the same move-call shape as step 2. Once a `txDigest` is supplied, the route fetches that transaction from Sui directly, checks `effects.status === 'success'`, confirms a `RentStarted` event exists for that listing, and only then returns the `namespace`/`accountId` needed to call `POST /api/agent/recall`. There is no separate payment ledger to reconcile — the chain *is* the ledger.
+
+```jsonc
+// GET /api/agent/access with no txDigest → 402 Payment Required
+{
+  "error": "payment_required",
+  "scheme": "sui-move-walmarket",
+  "version": "1",
+  "payment": {
+    "packageId": "0x...", "registryId": "0x...", "listingId": "0x...",
+    "purchase": {
+      "moveCallTarget": "0x...::walmarket::purchase_listing_with_access",
+      "amountMist": "500000000",
+      "args": ["registryId", "listingId", "coin(amountMist)", "delegateKeyPublic:vector<u8>", "clock(0x6)"]
+    }
+  },
+  "instructions": [
+    "1. Generate an Ed25519 keypair — the private key is your delegate key and never leaves your agent.",
+    "2. Call the moveCallTarget above with your delegate public key as vector<u8>.",
+    "3. Retry this endpoint with { listingId, txDigest, delegateKeyHex } once the tx is finalized."
+  ]
+}
+```
+
+`packages/sdk/src/agent-client.ts`'s `AgentClient` is the reference implementation of the *caller* side of this loop — `browse()`, `discover()`, `getListing()`, `verifyAccess()` (throws a typed `Payment402Error` carrying the full `PaymentDetails` object when payment hasn't happened yet), and `recall()`. It has zero browser dependencies — it's plain `fetch`, so it runs unmodified in Node.js, Deno, Bun, or an edge function, which is the point: the buyer in this loop is code, not a person with a wallet extension open in a tab.
+
+Two payment shapes ride this same protocol, both reusing the identical `QueryRequest`/`QueryRequested` on-chain pathway so the seller's query-responder agent doesn't need to know which one it's answering:
+
+- **One free question** (`request_query`, capped on-chain at `MAX_FREE_QUERIES = 1` per buyer/listing) — the x402 flow for *evaluating* a listing before paying anything at all.
+- **`pay_per_query`** — the streaming counterpart: no purchase or rental needed, just sign-and-submit a Move call with payment attached per message, uncapped. This is the shape built specifically for agent-to-agent usage that would rather pay a few MIST per query indefinitely than commit to buying or renting up front — the same x402 discovery → pay → verify loop, just repeated per message instead of once.
 ---
 
 ## What's Implemented Today
@@ -98,7 +141,60 @@ Every feature below is live against real testnet contracts and a real MemWal rel
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
+## Tech Stack
+
+### Layers, end to end
+
+```
+Browser (zkLogin)            Agent (HTTP/x402)
+        │                            │
+        ▼                            ▼
+  apps/web (Next.js 14, App Router, Tailwind, zustand, @tanstack/react-query)
+        │
+        ▼
+  packages/sdk  (@mysten/sui, @mysten/seal, @mysten/walrus, @mysten-incubation/memwal)
+        │                            │
+        ▼                            ▼
+  Sui Move (packages/contracts)   MemWal relayer → Walrus blobs + Seal key servers
+```
+
+Every layer below the Next.js app talks to Sui directly or through the SDK — there is no backend database holding source-of-truth state. Postgres/SQLite only ever caches things that are expensive or impossible to keep on-chain (see *Managed-seller runtime* below).
+
+### Sui Move contract (`packages/contracts/sources/walmarket.move`)
+
+A few design decisions worth calling out beyond what's in [`packages/contracts/README.md`](packages/contracts/README.md):
+
+- **One `QueryRequest` shape, three callers.** `request_query` (free, capped), `pay_per_query` (paid, uncapped), and the seller's `submit_query_response` all operate on the identical `QueryRequest` struct. The cap/payment logic lives entirely in the *request* functions; the *answer* function (`submit_query_response`) doesn't know or care whether the query it's answering was free or paid. That's why streaming pay-per-query pricing shipped with zero changes to `apps/web/src/lib` query-responder logic or `packages/sdk/src/agents/query-responder-service.ts` — it was already listening for `QueryRequested` and didn't need to distinguish.
+- **Rentals and purchases share one access primitive.** `RentAccess` is minted by both `rent_listing` (real `expires_at`) and `purchase_listing_with_access` (the `PERMANENT_ACCESS_EXPIRY` sentinel, `u64::MAX` milliseconds). Because `expire_rent`'s guard is `clock.timestamp_ms() >= access.expires_at`, a sentinel that large can never be satisfied, so a permanent grant can never be accidentally swept by the same cleanup path that reclaims expired rentals. One struct, one Seal policy (`seal_approve`), one event (`RentStarted`) for both "bought" and "rented."
+- **Owner/operator split is the actual authentication mechanism, not a convenience.** `submit_query_response` has exactly one check: `ctx.sender() == listing.operator`. There's no API key, no JWT, no separate signature scheme layered on top — Sui's native transaction signing *is* the authentication. This only works because `set_operator` lets a listing's `owner` (a zkLogin session with no exportable key — fine for occasional pricing changes) delegate to a `operator` address backed by a real, long-lived keypair that a server process can hold and sign with continuously.
+- **Fee math happens inside the same transaction as the transfer, every time.** `purchase_listing`, `rent_listing`, and `pay_per_query` each independently compute `fee = price * registry.fee_bps / FEE_BPS_DENOM` and split the `Coin<SUI>` via `coin::split` before transferring — there's no "charge now, settle fees later" step that could be skipped or front-run. Overpayment is refunded in the same call (`coin::destroy_zero` if exact, `public_transfer` back to sender otherwise), so the contract never holds a leftover `Coin`.
+- **Reputation requires the proof object, not a claim.** `submit_review` takes a `&RentAccess` by reference and checks `access.renter == ctx.sender() && access.listing_id == object::id(listing)`. Because Move objects are owned and can't be fabricated, the only way to pass that check is to actually hold an access grant the contract itself minted — there's no `bool hasPurchased` field anywhere to spoof.
+- **Storage rebates are a deliberate non-goal for `MemoryListing`.** Listings are shared objects that are never deleted (`delist` only flips `is_active`), because Sui's object model doesn't let a shared object's *contents* — including its `Table<address, u64>` of free-query counts — be safely torn down while other transactions might reference it concurrently. `RentAccess` (owned, single-writer) is the one struct that *does* get deleted, via `expire_rent`, to reclaim storage rent once it's unambiguously dead.
+- **Tests exercise rejection paths, not just happy paths.** All 28 tests in `tests/walmarket_tests.move` are written to assert specific abort codes (`ENotOperator`, `EQueryLimitReached`, `EAlreadyAnswered`, `ENoSealAccess`, …), not just that "the test didn't crash" — because in Move, an `assert!` that silently passes when it should abort is a security bug, not a logic bug.
+
+### TypeScript SDK (`packages/sdk`)
+
+A thin, typed mirror of the Move module — every `WalMarketClient` method (`purchaseListing`, `rentListing`, `requestQuery`, `payPerQuery`, `submitQueryResponse`, `submitReview`, `setOperator`, …) builds exactly one Move call via `@mysten/sui`'s `Transaction` builder and executes it through `tx-utils.ts`'s `executeTx`, which retries up to 3 times with linear backoff on transient RPC failures before surfacing the error. The SDK deliberately has no business logic of its own to diverge from the contract — it's a 1:1 typed wrapper, so a new Move entry function shows up as a new client method, not a redesign.
+
+- **`seal-access.ts`** implements the client side of the Seal policy. `encryptDelegateKey` builds a Seal "identity" (`id`) that's just the bare 32-byte hex of a `RentAccess` object ID (`buildId` strips the `0x` prefix), encrypts the buyer's delegate private key against a `t`-of-`n` threshold of key servers (`threshold = ceil(serverCount / 2)`), and stores the ciphertext as a Walrus blob. `decryptDelegateKey` does the reverse: it builds an ephemeral `SessionKey` (signed by the renter's wallet, 30-minute TTL) and hands the key servers a transaction's BCS bytes that calls `seal_approve` — the servers dry-run that call against current on-chain state and only release their decryption shares if it doesn't abort. The blob's Walrus storage duration is capped at 30 epochs regardless of `expires_at`, since the blob only needs to survive long enough for one fetch-and-decrypt, not the lifetime of the access grant itself (which lives in `RentAccess.expires_at` on-chain).
+- **`memwal-connector.ts`** wraps `@mysten-incubation/memwal`'s relayer client for `recall` (raw semantic search) and `ask` (LLM-synthesized answer over recalled memories) — this is what actually answers a `QueryRequest`'s `message`, never WalMarket's own inference.
+- **`event-indexer.ts`** polls Sui events (`ListingCreated`, `RentStarted`, `QueryRequested`, `ReviewSubmitted`, …) rather than re-fetching full object state every tick — the same pattern both `agents/query-responder-service.ts` and `agents/rental-key-manager-service.ts` use to react to on-chain activity without a websocket subscription or an indexing service of their own.
+- **`agent-client.ts`** is the machine-facing counterpart to `WalMarketClient` — it speaks the `apps/web` `/api/agent/*` HTTP surface (browse, test-query, purchase-verify, recall) instead of building Move calls directly, returning a structured x402-style `402 Payment Required` body (exact move-call instructions, not just a status code) when a caller hits a paid action without proof of payment yet.
+
+### Next.js app (`apps/web`)
+
+Next.js 14 App Router, Tailwind, `zustand` for small client-side UI state, `@tanstack/react-query` for server-state caching against the chain/MemWal. Two things worth knowing about how it's wired:
+
+- **Two seller paths converge on the same contract calls.** A self-hosted seller's `apps/demo-agent` and a managed seller's in-process runtime (`apps/web/src/lib/managed-provision.ts`, booted from `apps/web/src/instrumentation.ts` on server start) both end up calling the identical `WalMarketClient.submitQueryResponse`/key-granting flow — the only difference is who holds the MemWal account's private key (self-hosted: the seller, on their own machine; managed: WalMarket, AES-256-GCM-encrypted at rest via `MANAGED_AGENT_ENCRYPTION_KEY`, decrypted only in-process to sign).
+- **`better-sqlite3` is local cache, not source of truth.** It backs `apps/web/src/lib/managed-store.ts` for tracking which managed MemWal accounts exist and their encrypted keys — every fact that matters for money or access (price, ownership, rental expiry, free-query count) lives in the Move objects themselves and is read fresh via `event-indexer.ts`/RPC, not cached in SQLite.
+- **`ai` + `@ai-sdk/openai`** power the buyer-facing playground chat and `/api/memwal/ask` — these call the same MemWal `/api/ask` relayer endpoint the contract's `QueryRequest` flow is built around, just without the on-chain request/response round-trip, since a buyer who already holds a `RentAccess` doesn't need the free-trial cap enforced again.
+
+### Why Move over an EVM/Solidity equivalent
+
+Sui's object model is what makes the "Seal gates on `RentAccess` *object* possession" design work cleanly: `seal_approve`'s only real check is "does the caller hold this exact object," which is a first-class, unforgeable property of Sui's owned-object model — there's no `mapping(address => bool)` to keep in sync or worry about being front-run on. The same property is why `submit_review` can require "pass in a `RentAccess` you actually hold" as its entire authentication, instead of a separate `hasPurchased[msg.sender][listingId]` bookkeeping structure that the contract would have to maintain and that could drift from reality.
+
 ---
+
 
 ## Project Structure
 
