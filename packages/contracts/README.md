@@ -8,8 +8,9 @@ Module: `walmarket::walmarket` — single file, [`sources/walmarket.move`](sourc
 
 | Type | Kind | Purpose |
 |---|---|---|
-| `WalMarketRegistry` | shared, singleton (created in `init`) | Tracks `listing_count`, `total_volume_mist`, `fee_bps` (250 = 2.5%), `fee_recipient`. |
-| `MemoryListing` | shared | One per seller listing. Carries `owner` (who manages price/delisting), `operator` (who's authorized to answer queries — see below), `account_id`/`namespace` (pointer into MemWal), pricing (`Option<u64>` sale/rent/price-per-query — `none` means "not offered that way"), a `Table<address, u64>` of per-buyer free-query usage, and `total_rating_sum`/`review_count` for on-chain reputation. Never deleted — `delist` only flips `is_active`. |
+| `WalMarketRegistry` | shared, singleton (created in `init`) | Tracks `listing_count`, `total_volume_mist`, `fee_bps` (250 = 2.5%, governed by `FeeManagerRole`), `fee_recipient` (also `FeeManagerRole`), `paused` (emergency circuit breaker, governed by `PauserRole` — see [OpenZeppelin section](#openzeppelin-governance--rate-limiting) below). |
+| `AccessControl<WALMARKET>` | shared, singleton (created in `init`) | `openzeppelin_access::access_control` registry rooted at this module's OTW (`WALMARKET`). Holds the `FeeManagerRole`/`PauserRole` role membership that gates `set_fee_bps`/`set_fee_recipient`/`pause`/`unpause`. |
+| `MemoryListing` | shared | One per seller listing. Carries `owner` (who manages price/delisting), `operator` (who's authorized to answer queries — see below), `account_id`/`namespace` (pointer into MemWal), pricing (`Option<u64>` sale/rent/price-per-query — `none` means "not offered that way"), a `Table<address, u64>` of per-buyer free-query usage, `total_rating_sum`/`review_count` for on-chain reputation, and a `query_rate_limiter` (`openzeppelin_utils::rate_limiter` token bucket) throttling `pay_per_query`. Never deleted — `delist` only flips `is_active`. |
 | `RentAccess` | owned, transferred to buyer/renter | Proof of purchase or rental. Carries the buyer's own `delegate_key_public` (submitted by them, never minted by WalMarket), `expires_at` (`PERMANENT_ACCESS_EXPIRY` = `u64::MAX` for outright purchases, a real timestamp for rentals), and the `namespace`/`account_id` to query. Also doubles as proof-of-purchase for `submit_review`. |
 | `QueryRequest` | shared | One per try-before-you-buy message — whether free (`request_query`) or paid (`pay_per_query`); both create the same struct, so the seller's query-responder agent answers either with zero code difference. Starts with `answer: none`; only the listing's `operator` can fill it in via `submit_query_response`. |
 | `Review` | shared | One per submitted review. Carries `rating` (1–5), `comment`, `reviewer`, `listing_id`. Only mintable via `submit_review`, which requires holding a matching `RentAccess` — see Security notes below. |
@@ -32,12 +33,24 @@ Module: `walmarket::walmarket` — single file, [`sources/walmarket.move`](sourc
 | `submit_query_response` | `listing.operator` only | Fills in a `QueryRequest`'s answer (free or paid — the struct is identical either way). Asserts `ctx.sender() == listing.operator` (`ENotOperator`) and that it hasn't already been answered (`EAlreadyAnswered`) — the only authentication is Sui's native tx signing, no separate signature scheme. |
 | `submit_review` | holder of a matching `RentAccess` | On-chain reputation. Asserts the caller's `RentAccess.renter == ctx.sender()` and `RentAccess.listing_id == object::id(listing)` (`ENotAccessHolder`) and `1 <= rating <= 5` (`EInvalidRating`), shares a `Review`, updates the listing's `total_rating_sum`/`review_count`, emits `ReviewSubmitted` (including `review_id`, so off-chain code can fetch the full `Review` object — the event itself doesn't carry the comment text). |
 | `seal_approve` | anyone (called by Seal key servers via dry-run) | The Seal access-control policy. Succeeds only if `ctx.sender() == access.renter` AND the requested `id` is exactly this `RentAccess`'s object ID — i.e. decrypt only if you hold the matching access object right now. |
+| `set_fee_bps` | holder of `Auth<FeeManagerRole>` | Updates `registry.fee_bps`, capped at `MAX_FEE_BPS` (2,000 / 20%). No sender check in the body — holding the `Auth` reference is itself the authorization (see [OpenZeppelin section](#openzeppelin-governance--rate-limiting)). |
+| `set_fee_recipient` | holder of `Auth<FeeManagerRole>` | Updates `registry.fee_recipient`. Rejects `@0x0`. |
+| `pause` / `unpause` | holder of `Auth<PauserRole>` | Flips `registry.paused`, gating `purchase_listing`/`purchase_listing_with_access`/`rent_listing`/`pay_per_query` only — browsing, the free trial query, and reviews are unaffected. |
 
-Plus read-only helpers (`listing_owner`, `listing_operator`, `listing_free_queries_used`, `listing_price_per_query`, `listing_rating_sum`, `listing_review_count`, `query_answer`, `review_rating`, `registry_volume`, …) for the SDK/indexer to use instead of parsing raw object fields where a getter exists.
+Plus read-only helpers (`listing_owner`, `listing_operator`, `listing_free_queries_used`, `listing_price_per_query`, `listing_rating_sum`, `listing_review_count`, `query_answer`, `review_rating`, `registry_volume`, `registry_paused`, `listing_query_rate_available`, …) for the SDK/indexer to use instead of parsing raw object fields where a getter exists.
+
+## OpenZeppelin governance + rate limiting
+
+`Move.toml` depends on two packages from [OpenZeppelin Contracts for Sui](https://github.com/OpenZeppelin/contracts-sui) (`openzeppelin_access`, `openzeppelin_utils`, pinned at `rev = "v1.3.0"`):
+
+- **`access_control`** roots an `AccessControl<WALMARKET>` registry at this module's One-Time Witness, minted once in `init`. `FeeManagerRole` and `PauserRole` are plain marker structs defined in `walmarket.move` itself (required — `access_control` only accepts home-module role types) and are granted to the deployer at publish. Gated functions take `&Auth<Role>` as a parameter with no further sender check in the body, since `Auth<Role>` can only be minted by `access_control::new_auth` against someone who currently holds `Role`. The root role can only be reassigned through `access_control`'s built-in timelocked transfer/renounce flow (`PROTOCOL_ADMIN_DELAY_MS` = 2 days).
+- **`rate_limiter`** embeds a token-bucket `RateLimiter` directly inside every `MemoryListing` (burst 20, refill 1 every 3s). `pay_per_query` calls `consume_or_abort` against it before moving any payment, so a buyer's agent looping the endpoint can't outpace the seller's query-responder throughput — and a throttled call's coin is never touched, since the abort reverts the whole transaction.
+
+See the root [README's Security & Governance section](../../README.md#security--governance-openzeppelin) for the full rationale.
 
 ## Events
 
-`ListingCreated`, `ListingUpdated`, `OperatorUpdated`, `ListingDelisted`, `ListingSold`, `RentStarted`, `RentConfirmed`, `RentExpired`, `QueryRequested`, `QueryAnswered`, `ReviewSubmitted` — every state change emits one. `packages/sdk/src/event-indexer.ts` and the seller-agent services in `packages/sdk/src/agents/` poll these rather than re-reading full object state on every tick.
+`ListingCreated`, `ListingUpdated`, `OperatorUpdated`, `ListingDelisted`, `ListingSold`, `RentStarted`, `RentConfirmed`, `RentExpired`, `QueryRequested`, `QueryAnswered`, `ReviewSubmitted`, `FeeUpdated`, `FeeRecipientUpdated`, `ProtocolPaused`, `ProtocolUnpaused` — every state change emits one. `packages/sdk/src/event-indexer.ts` and the seller-agent services in `packages/sdk/src/agents/` poll these rather than re-reading full object state on every tick.
 
 ## Error codes
 
@@ -59,10 +72,15 @@ Plus read-only helpers (`listing_owner`, `listing_operator`, `listing_free_queri
 | 14 | `EQueryPriceNotSet` | `pay_per_query` called on a listing with `price_per_query_mist == none`. |
 | 15 | `EInvalidRating` | `submit_review` called with `rating` outside `1`–`5`. |
 | 16 | `ENotAccessHolder` | `submit_review` called with a `RentAccess` that isn't the caller's, or doesn't belong to this listing. |
+| 17 | `EProtocolPaused` | `purchase_listing`/`purchase_listing_with_access`/`rent_listing`/`pay_per_query` called while `registry.paused == true`. |
+| 18 | `EInvalidFeeBps` | `set_fee_bps` called with a value above `MAX_FEE_BPS` (2,000 / 20%). |
+| 19 | `EZeroAddress` | `set_fee_recipient` called with `@0x0`. |
+
+`access_control`'s own `EUnauthorized` (code 0) and `rate_limiter`'s own `ERateLimited` (code 0) can also abort a transaction — they originate from `openzeppelin_access::access_control`/`openzeppelin_utils::rate_limiter` respectively, distinguishable from this module's codes by abort *location*, not just code number.
 
 ## Tests
 
-`tests/walmarket_tests.move` — **28 passing unit tests**, covering: listing creation/fields, purchase (with and without access grant), rent (success, zero-hour and over-max-duration rejection), expire-rent (before/after expiry), non-owner rejection on `delist`/`update_pricing`, `set_operator` success/non-owner rejection, `seal_approve` success/mismatched-id/non-holder rejection, the full `request_query`/`submit_query_response` lifecycle (success, free-limit exhaustion, empty-message rejection, non-operator rejection, double-answer rejection), `pay_per_query` (success and volume tracking, price-not-set rejection, insufficient-payment rejection), and `submit_review` (success and rating aggregation, non-access-holder rejection, invalid-rating rejection).
+`tests/walmarket_tests.move` — **34 passing unit tests**, covering: listing creation/fields, purchase (with and without access grant), rent (success, zero-hour and over-max-duration rejection), expire-rent (before/after expiry), non-owner rejection on `delist`/`update_pricing`, `set_operator` success/non-owner rejection, `seal_approve` success/mismatched-id/non-holder rejection, the full `request_query`/`submit_query_response` lifecycle (success, free-limit exhaustion, empty-message rejection, non-operator rejection, double-answer rejection), `pay_per_query` (success and volume tracking, price-not-set rejection, insufficient-payment rejection), `submit_review` (success and rating aggregation, non-access-holder rejection, invalid-rating rejection), governance (`set_fee_bps`/`set_fee_recipient` success for a `FeeManagerRole` holder, rejection for a non-holder, rejection above `MAX_FEE_BPS`, `pause`/`unpause` round-trip, purchase rejection while paused), and the `pay_per_query` rate limiter (abort once the burst bucket is exhausted).
 
 ```bash
 sui move test          # from this directory, or `pnpm test:contracts` from repo root

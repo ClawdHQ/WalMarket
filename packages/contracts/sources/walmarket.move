@@ -5,6 +5,8 @@ module walmarket::walmarket {
     use sui::sui::SUI;
     use sui::table::{Self, Table};
     use std::string::String;
+    use openzeppelin_access::access_control::{Self, Auth};
+    use openzeppelin_utils::rate_limiter::{Self, RateLimiter};
 
     // ─── Error codes ───────────────────────────────────────────────────────────
     const ENotOwner: u64          = 1;
@@ -23,6 +25,9 @@ module walmarket::walmarket {
     const EQueryPriceNotSet: u64  = 14;
     const EInvalidRating: u64     = 15;
     const ENotAccessHolder: u64   = 16;
+    const EProtocolPaused: u64    = 17;
+    const EInvalidFeeBps: u64     = 18;
+    const EZeroAddress: u64       = 19;
 
     const MAX_CATEGORY: u8 = 4;
     const MIN_RENT_HOURS: u64 = 1;
@@ -40,6 +45,45 @@ module walmarket::walmarket {
     // (timestamp_ms >= expires_at) can never pass against u64::MAX, so a permanent
     // access can never be (mistakenly) burned via that path.
     const PERMANENT_ACCESS_EXPIRY: u64 = 18_446_744_073_709_551_615;
+
+    // Sanity ceiling on set_fee_bps — independent of (and tighter than) the
+    // arithmetic ceiling of FEE_BPS_DENOM, so a compromised/misconfigured
+    // FeeManagerRole holder can't push the protocol fee to something
+    // confiscatory in one call.
+    const MAX_FEE_BPS: u64 = 2_000; // 20%
+
+    // Timelock (ms) for transferring or renouncing the protocol's root
+    // governance role — see openzeppelin_access::access_control. Matches the
+    // delay enforced on listing rentals/etc. being in the hours-to-days range,
+    // not an instant rug-pull window.
+    const PROTOCOL_ADMIN_DELAY_MS: u64 = 172_800_000; // 2 days
+
+    // Per-listing pay_per_query throughput guard (token bucket via
+    // openzeppelin_utils::rate_limiter). Unlike request_query (capped at
+    // MAX_FREE_QUERIES total per buyer), pay_per_query is deliberately
+    // unlimited *count*-wise — this only bounds *rate*, so a buyer's agent
+    // looping the endpoint can't outpace the seller's underlying
+    // query-responder/MemWal throughput, while still allowing normal bursty
+    // chat usage.
+    const QUERY_RATE_CAPACITY: u64 = 20;               // burst allowance
+    const QUERY_RATE_REFILL_AMOUNT: u64 = 1;            // tokens credited per interval
+    const QUERY_RATE_REFILL_INTERVAL_MS: u64 = 3_000;   // ~20/min sustained after burst
+
+    // ─── Governance (OpenZeppelin AccessControl) ──────────────────────────────
+    // One-time witness for this module — the root of the protocol's
+    // AccessControl registry, minted once at publish and consumed by init().
+    public struct WALMARKET has drop {}
+
+    // Authorizes set_fee_bps / set_fee_recipient. Granted to the deployer at
+    // init; the root role (WALMARKET) can delegate it to a separate
+    // treasury/ops address without handing over full protocol control.
+    public struct FeeManagerRole {}
+
+    // Authorizes pause/unpause — an emergency circuit breaker on the
+    // money-moving entrypoints (purchase/rent/pay_per_query), separate from
+    // FeeManagerRole so an incident responder doesn't also need fee-setting
+    // power.
+    public struct PauserRole {}
 
     // ─── Core types ────────────────────────────────────────────────────────────
 
@@ -80,6 +124,10 @@ module walmarket::walmarket {
         // submit_review, which requires proof of a real purchase/rental.
         total_rating_sum: u64,
         review_count: u64,
+        // Token-bucket throttle on this listing's pay_per_query throughput —
+        // see QUERY_RATE_CAPACITY. Embedded directly (not a Table) since the
+        // cap is global to the listing, not per-buyer.
+        query_rate_limiter: RateLimiter,
     }
 
     public struct RentAccess has key, store {
@@ -98,6 +146,10 @@ module walmarket::walmarket {
         total_volume_mist: u64,
         fee_bps: u64,
         fee_recipient: address,
+        // Emergency circuit breaker — gates purchase_listing,
+        // purchase_listing_with_access, rent_listing, and pay_per_query.
+        // Toggled only via Auth<PauserRole>; see pause()/unpause().
+        paused: bool,
     }
 
     public struct QueryRequest has key {
@@ -184,17 +236,39 @@ module walmarket::walmarket {
         review_id: ID,
     }
 
+    public struct FeeUpdated has copy, drop {
+        fee_bps: u64,
+    }
+
+    public struct FeeRecipientUpdated has copy, drop {
+        fee_recipient: address,
+    }
+
+    public struct ProtocolPaused has copy, drop {}
+
+    public struct ProtocolUnpaused has copy, drop {}
+
     // ─── Init ──────────────────────────────────────────────────────────────────
 
-    fun init(ctx: &mut TxContext) {
+    fun init(otw: WALMARKET, ctx: &mut TxContext) {
         let registry = WalMarketRegistry {
             id: object::new(ctx),
             listing_count: 0,
             total_volume_mist: 0,
             fee_bps: 250,  // 2.5%
             fee_recipient: ctx.sender(),
+            paused: false,
         };
         transfer::share_object(registry);
+
+        // Root governance registry, rooted at this module's OTW. The deployer
+        // becomes the default admin and is immediately granted the two
+        // operational roles so the protocol isn't stuck unmanaged right after
+        // publish — see set_fee_bps/set_fee_recipient/pause/unpause.
+        let mut ac = access_control::new<WALMARKET>(otw, PROTOCOL_ADMIN_DELAY_MS, ctx);
+        access_control::grant_role<WALMARKET, FeeManagerRole>(&mut ac, ctx.sender(), ctx);
+        access_control::grant_role<WALMARKET, PauserRole>(&mut ac, ctx.sender(), ctx);
+        transfer::public_share_object(ac);
     }
 
     // ─── Seller: create listing ────────────────────────────────────────────────
@@ -236,6 +310,14 @@ module walmarket::walmarket {
             free_query_counts: table::new(ctx),
             total_rating_sum: 0,
             review_count: 0,
+            query_rate_limiter: rate_limiter::new_bucket(
+                QUERY_RATE_CAPACITY,
+                QUERY_RATE_REFILL_AMOUNT,
+                QUERY_RATE_REFILL_INTERVAL_MS,
+                clock.timestamp_ms(),
+                QUERY_RATE_CAPACITY,
+                clock,
+            ),
         };
         registry.listing_count = registry.listing_count + 1;
         event::emit(ListingCreated {
@@ -282,6 +364,45 @@ module walmarket::walmarket {
         event::emit(ListingDelisted { listing_id: object::id(listing) });
     }
 
+    // ─── Governance: protocol fee (openzeppelin_access::access_control) ──────
+    // Holding `&Auth<FeeManagerRole>` is itself the authorization — it can only
+    // have been minted by access_control::new_auth against the registry rooted
+    // at this module's OTW, against a sender who genuinely held FeeManagerRole
+    // at mint time. No additional sender check is needed in the body.
+    public entry fun set_fee_bps(
+        registry: &mut WalMarketRegistry,
+        _auth: &Auth<FeeManagerRole>,
+        new_fee_bps: u64,
+    ) {
+        assert!(new_fee_bps <= MAX_FEE_BPS, EInvalidFeeBps);
+        registry.fee_bps = new_fee_bps;
+        event::emit(FeeUpdated { fee_bps: new_fee_bps });
+    }
+
+    public entry fun set_fee_recipient(
+        registry: &mut WalMarketRegistry,
+        _auth: &Auth<FeeManagerRole>,
+        new_fee_recipient: address,
+    ) {
+        assert!(new_fee_recipient != @0x0, EZeroAddress);
+        registry.fee_recipient = new_fee_recipient;
+        event::emit(FeeRecipientUpdated { fee_recipient: new_fee_recipient });
+    }
+
+    // ─── Governance: emergency pause (openzeppelin_access::access_control) ───
+    // Halts purchase_listing, purchase_listing_with_access, rent_listing, and
+    // pay_per_query — the four entrypoints that move payment — without
+    // touching listing/browse/free-trial/review flows.
+    public entry fun pause(registry: &mut WalMarketRegistry, _auth: &Auth<PauserRole>) {
+        registry.paused = true;
+        event::emit(ProtocolPaused {});
+    }
+
+    public entry fun unpause(registry: &mut WalMarketRegistry, _auth: &Auth<PauserRole>) {
+        registry.paused = false;
+        event::emit(ProtocolUnpaused {});
+    }
+
     // ─── Buyer: purchase outright ──────────────────────────────────────────────
 
     public entry fun purchase_listing(
@@ -291,6 +412,7 @@ module walmarket::walmarket {
         clock: &Clock,
         ctx: &mut TxContext,
     ) {
+        assert!(!registry.paused, EProtocolPaused);
         assert!(listing.is_active, EListingInactive);
         let price = *option::borrow(&listing.sale_price_mist);
         assert!(option::is_some(&listing.sale_price_mist), ENotForSale);
@@ -342,6 +464,7 @@ module walmarket::walmarket {
         clock: &Clock,
         ctx: &mut TxContext,
     ) {
+        assert!(!registry.paused, EProtocolPaused);
         assert!(listing.is_active, EListingInactive);
         assert!(option::is_some(&listing.sale_price_mist), ENotForSale);
         let price = *option::borrow(&listing.sale_price_mist);
@@ -410,6 +533,7 @@ module walmarket::walmarket {
         clock: &Clock,
         ctx: &mut TxContext,
     ) {
+        assert!(!registry.paused, EProtocolPaused);
         assert!(listing.is_active, EListingInactive);
         assert!(option::is_some(&listing.rent_price_per_hour_mist), ENotRentable);
         assert!(duration_hours >= MIN_RENT_HOURS && duration_hours <= MAX_RENT_HOURS, EInvalidDuration);
@@ -540,11 +664,15 @@ module walmarket::walmarket {
         clock: &Clock,
         ctx: &mut TxContext,
     ) {
+        assert!(!registry.paused, EProtocolPaused);
         assert!(listing.is_active, EListingInactive);
         assert!(!message.is_empty(), EInvalidMessage);
         assert!(option::is_some(&listing.price_per_query_mist), EQueryPriceNotSet);
         let price = *option::borrow(&listing.price_per_query_mist);
         assert!(coin::value(&payment) >= price, EInsufficientPayment);
+        // Throttled before any payment is moved — if the bucket is empty this
+        // aborts the whole transaction, so the buyer's coin is untouched.
+        rate_limiter::consume_or_abort(&mut listing.query_rate_limiter, 1, clock);
 
         let fee = price * registry.fee_bps / FEE_BPS_DENOM;
         let seller_amount = price - fee;
@@ -670,7 +798,7 @@ module walmarket::walmarket {
 
     #[test_only]
     public fun init_for_testing(ctx: &mut TxContext) {
-        init(ctx);
+        init(WALMARKET {}, ctx);
     }
 
     // ─── Read helpers ──────────────────────────────────────────────────────────
@@ -699,4 +827,8 @@ module walmarket::walmarket {
     public fun review_listing_id(review: &Review): ID { review.listing_id }
     public fun registry_fee_bps(registry: &WalMarketRegistry): u64 { registry.fee_bps }
     public fun registry_volume(registry: &WalMarketRegistry): u64 { registry.total_volume_mist }
+    public fun registry_paused(registry: &WalMarketRegistry): bool { registry.paused }
+    public fun listing_query_rate_available(listing: &MemoryListing, clock: &Clock): u64 {
+        rate_limiter::available(&listing.query_rate_limiter, clock)
+    }
 }

@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2024.beta"
 
 [dependencies]
-Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "testnet" }
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "testnet", override = true }
+MoveStdlib = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/move-stdlib", rev = "testnet", override = true }
+openzeppelin_access = { git = "https://github.com/OpenZeppelin/contracts-sui.git", subdir = "contracts/access", rev = "v1.3.0" }
+openzeppelin_utils = { git = "https://github.com/OpenZeppelin/contracts-sui.git", subdir = "contracts/utils", rev = "v1.3.0" }
 
 [addresses]
 walmarket = "0x0"

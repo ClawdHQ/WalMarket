@@ -47,6 +47,7 @@ That commitment is exactly what shapes the [Roadmap](#roadmap) below: mainnet de
 | **Sui Move** | `MemoryListing`/`RentAccess`/`QueryRequest` are real shared/owned Sui objects, not an off-chain database. Ownership, pricing, the free-query cap, and operator authorization are all enforced by the contract itself — see [`packages/contracts/README.md`](packages/contracts/README.md). |
 | **Sui zkLogin** (via Mysten Enoki) | Sellers and buyers sign in with Google and get a real Sui address with no wallet extension or seed phrase to manage. |
 | **x402** ([x402.org](https://www.x402.org/)) | The agent-payment protocol underneath the entire `/api/agent/*` surface. WalMarket implements the "HTTP 402 carries the payment instructions" shape, the settlement rail is a Sui Move call — see [Agent-to-Agent Payments (x402)](#agent-to-agent-payments-x402) below. |
+| **OpenZeppelin Contracts for Sui** ([contracts-sui](https://github.com/OpenZeppelin/contracts-sui)) | Audited Move primitives for protocol governance and abuse resistance — `openzeppelin_access::access_control` gates `set_fee_bps`/`set_fee_recipient`/`pause`/`unpause`, and `openzeppelin_utils::rate_limiter` throttles `pay_per_query`. See [Security & Governance (OpenZeppelin)](#security--governance-openzeppelin) below. |
 | **Sui zkLogin** (via Mysten Enoki) | Sellers and buyers sign in with Google and get a real Sui address with no wallet extension or seed phrase to manage. |
 
 ---
@@ -92,6 +93,53 @@ Two payment shapes ride this same protocol, both reusing the identical `QueryReq
 - **`pay_per_query`** — the streaming counterpart: no purchase or rental needed, just sign-and-submit a Move call with payment attached per message, uncapped. This is the shape built specifically for agent-to-agent usage that would rather pay a few MIST per query indefinitely than commit to buying or renting up front — the same x402 discovery → pay → verify loop, just repeated per message instead of once.
 ---
 
+## Security & Governance (OpenZeppelin)
+
+Before this, `walmarket.move` had no way to change the protocol fee, no way to react to an incident in flight, and no guard against a single buyer hammering `pay_per_query` faster than a seller's underlying MemWal/LLM throughput could keep up — `fee_bps`/`fee_recipient` were set once in `init` and frozen forever, and `pay_per_query` was deliberately *uncapped by count* (see [Agent-to-Agent Payments](#agent-to-agent-payments-x402) above) with nothing bounding its *rate*. `walmarket.move` now depends on two audited [OpenZeppelin Contracts for Sui](https://github.com/OpenZeppelin/contracts-sui) packages ([`Move.toml`](packages/contracts/Move.toml)) to close both gaps with battle-tested primitives instead of hand-rolled ones:
+
+```toml
+[dependencies]
+openzeppelin_access = { git = "https://github.com/OpenZeppelin/contracts-sui.git", subdir = "contracts/access", rev = "v1.3.0" }
+openzeppelin_utils  = { git = "https://github.com/OpenZeppelin/contracts-sui.git", subdir = "contracts/utils",  rev = "v1.3.0" }
+```
+
+Both OZ packages pull in their own (slightly different) `Sui`/`MoveStdlib` framework revisions transitively, which the Move resolver flags as a version conflict against this package's own framework dependency. `Move.toml` resolves it the standard way — pinning `Sui` and `MoveStdlib` explicitly with `override = true` so every package in the graph builds against the same framework revision:
+
+```toml
+Sui = { git = "...", subdir = "crates/sui-framework/packages/sui-framework", rev = "testnet", override = true }
+MoveStdlib = { git = "...", subdir = "crates/sui-framework/packages/move-stdlib", rev = "testnet", override = true }
+```
+
+### `openzeppelin_access::access_control` — protocol governance
+
+At publish, `init` mints `walmarket.move`'s One-Time Witness (`WALMARKET`) into a root `AccessControl<WALMARKET>` registry ([OZ's RBAC primitive](https://docs.openzeppelin.com/contracts-sui/1.x/access-control)) and shares it as its own object, separate from `WalMarketRegistry`. The deployer becomes the registry's default admin and is immediately granted two operational roles, both defined in `walmarket.move` itself so they pass `access_control`'s home-module check:
+
+- **`FeeManagerRole`** — authorizes `set_fee_bps` (capped at `MAX_FEE_BPS = 2_000` / 20%, independent of the arithmetic `FEE_BPS_DENOM` ceiling) and `set_fee_recipient`. The root admin can delegate this to a separate treasury/ops address without handing over full protocol control.
+- **`PauserRole`** — authorizes `pause`/`unpause`, an emergency circuit breaker that gates exactly the four money-moving entrypoints — `purchase_listing`, `purchase_listing_with_access`, `rent_listing`, `pay_per_query` — while leaving browsing, the free try-before-you-buy query, `submit_query_response`, and `submit_review` untouched.
+
+```move
+public entry fun set_fee_bps(
+    registry: &mut WalMarketRegistry,
+    _auth: &Auth<FeeManagerRole>,   // holding this reference IS the authorization
+    new_fee_bps: u64,
+) { ... }
+```
+
+Each gated function takes `&Auth<Role>` as a parameter and does **no additional sender check in its body** — `Auth<Role>` can only have been minted by `access_control::new_auth` against a sender who, at mint time, genuinely held `Role` in the unique registry rooted at `WALMARKET`. A caller without the role can't even construct the argument, so the call fails before `walmarket.move`'s own logic runs at all. The root role itself can only move via `access_control`'s built-in timelocked transfer/renounce flow (`PROTOCOL_ADMIN_DELAY_MS = 172_800_000`, 2 days) — there's no instant rug-pull path to reassign protocol governance.
+
+### `openzeppelin_utils::rate_limiter` — `pay_per_query` throttling
+
+Every `MemoryListing` embeds a `RateLimiter` ([token bucket](https://docs.openzeppelin.com/contracts-sui/1.x/utils)) seeded at creation with a burst capacity of 20 and a refill of 1 token every 3 seconds (~20/min sustained). `pay_per_query` calls `consume_or_abort` against it *before* touching the buyer's payment — if the bucket is empty the whole transaction (including the coin split) aborts and reverts, so a throttled caller's funds are never at risk. This bounds *rate*, not *count*: a listing's pay-per-query pricing is still uncapped in total volume, exactly as designed, but one buyer's agent looping the endpoint can no longer outpace the seller's underlying query-responder/MemWal throughput. `listing_query_rate_available(listing, clock)` exposes the current bucket level for off-chain introspection (e.g. surfacing "slow down" in the agent client before it gets rate-limited on-chain).
+
+### Why these two, specifically
+
+Both additions target a real gap rather than bolting on OpenZeppelin for its own sake: governance because the original contract had *no* admin surface at all once published, and rate limiting because `pay_per_query` was explicitly designed to be uncapped (unlike the one-shot free trial) and therefore needed a throughput guard somewhere. Using OZ's audited `Auth<Role>`/`RateLimiter` primitives instead of a hand-rolled `assert!(sender == hardcoded_address)` or a custom token-bucket struct means the authorization and throttling logic itself has already been reviewed, fuzzed, and used across other Sui protocols — see [`packages/contracts/README.md`](packages/contracts/README.md) for how this composes with the rest of the contract's security model.
+
+---
+
+
+
+
 ## What's Implemented Today
 
 Every feature below is live against real testnet contracts and a real MemWal relayer.
@@ -110,6 +158,7 @@ Every feature below is live against real testnet contracts and a real MemWal rel
 - **Permanent, exportable access** — after buying or renting, the buyer's delegate key (generated client-side, never seen by WalMarket) unlocks 15+ ready-made export formats: MCP server config, Claude Code, Cursor, GitHub Copilot, OpenAI/ChatGPT, Claude API, Vercel AI SDK, LangChain, Deepseek, Gemini, and more — see `apps/web/src/lib/export-formats.ts`.
 - **Playground** — a real chat interface for buyers/renters to converse with memory they've actually paid for, using their own delegate key client-side.
 - **zkLogin auth** via Mysten Enoki — Google sign-in, no wallet extension.
+- **OpenZeppelin governance + rate limiting** — protocol fee and emergency pause are now governed by `openzeppelin_access::access_control` (`FeeManagerRole`/`PauserRole` `Auth` capabilities, timelocked root-role transfer), and `pay_per_query` is throttled per listing via `openzeppelin_utils::rate_limiter`'s token bucket. See [Security & Governance (OpenZeppelin)](#security--governance-openzeppelin) above.
 
 ---
 
@@ -170,6 +219,7 @@ A few design decisions worth calling out beyond what's in [`packages/contracts/R
 - **Fee math happens inside the same transaction as the transfer, every time.** `purchase_listing`, `rent_listing`, and `pay_per_query` each independently compute `fee = price * registry.fee_bps / FEE_BPS_DENOM` and split the `Coin<SUI>` via `coin::split` before transferring — there's no "charge now, settle fees later" step that could be skipped or front-run. Overpayment is refunded in the same call (`coin::destroy_zero` if exact, `public_transfer` back to sender otherwise), so the contract never holds a leftover `Coin`.
 - **Reputation requires the proof object, not a claim.** `submit_review` takes a `&RentAccess` by reference and checks `access.renter == ctx.sender() && access.listing_id == object::id(listing)`. Because Move objects are owned and can't be fabricated, the only way to pass that check is to actually hold an access grant the contract itself minted — there's no `bool hasPurchased` field anywhere to spoof.
 - **Storage rebates are a deliberate non-goal for `MemoryListing`.** Listings are shared objects that are never deleted (`delist` only flips `is_active`), because Sui's object model doesn't let a shared object's *contents* — including its `Table<address, u64>` of free-query counts — be safely torn down while other transactions might reference it concurrently. `RentAccess` (owned, single-writer) is the one struct that *does* get deleted, via `expire_rent`, to reclaim storage rent once it's unambiguously dead.
+- **Governance and rate limiting lean on audited OpenZeppelin Move primitives, not hand-rolled checks.** `openzeppelin_access::access_control` and `openzeppelin_utils::rate_limiter` are real `[dependencies]` in `Move.toml`, not vendored/copied code — see [Security & Governance (OpenZeppelin)](#security--governance-openzeppelin) above for what they gate.
 - **Tests exercise rejection paths, not just happy paths.** All 28 tests in `tests/walmarket_tests.move` are written to assert specific abort codes (`ENotOperator`, `EQueryLimitReached`, `EAlreadyAnswered`, `ENoSealAccess`, …), not just that "the test didn't crash" — because in Move, an `assert!` that silently passes when it should abort is a security bug, not a logic bug.
 
 ### TypeScript SDK (`packages/sdk`)

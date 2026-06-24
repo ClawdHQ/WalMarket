@@ -8,12 +8,16 @@ module walmarket::walmarket_tests {
     use std::string;
     use walmarket::walmarket::{
         Self,
+        WALMARKET,
+        FeeManagerRole,
+        PauserRole,
         WalMarketRegistry,
         MemoryListing,
         RentAccess,
         QueryRequest,
         Review,
     };
+    use openzeppelin_access::access_control::{Self, AccessControl};
 
 
     const SELLER: address = @0xA;
@@ -927,6 +931,193 @@ module walmarket::walmarket_tests {
             );
             ts::return_to_sender(&scenario, access);
             ts::return_shared(listing);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    // ─── Test: governance (openzeppelin_access::access_control) ──────────────
+    // init grants the deployer both FeeManagerRole and PauserRole against the
+    // AccessControl<WALMARKET> registry it shares — these tests exercise the
+    // resulting set_fee_bps/set_fee_recipient/pause/unpause entrypoints.
+
+    #[test]
+    fun test_set_fee_bps_succeeds_for_fee_manager() {
+        let mut scenario = ts::begin(SELLER);
+        { walmarket::init_for_testing(ts::ctx(&mut scenario)); };
+
+        ts::next_tx(&mut scenario, SELLER);
+        {
+            let mut registry = ts::take_shared<WalMarketRegistry>(&scenario);
+            let ac = ts::take_shared<AccessControl<WALMARKET>>(&scenario);
+            let auth = access_control::new_auth<WALMARKET, FeeManagerRole>(&ac, ts::ctx(&mut scenario));
+            walmarket::set_fee_bps(&mut registry, &auth, 500u64);
+            assert!(walmarket::registry_fee_bps(&registry) == 500u64, 90);
+            ts::return_shared(registry);
+            ts::return_shared(ac);
+        };
+
+        ts::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = 0, location = openzeppelin_access::access_control)] // EUnauthorized
+    fun test_set_fee_bps_fails_for_non_fee_manager() {
+        let mut scenario = ts::begin(SELLER);
+        { walmarket::init_for_testing(ts::ctx(&mut scenario)); };
+
+        // BUYER was never granted FeeManagerRole, so minting Auth<FeeManagerRole>
+        // for them aborts inside access_control itself, before set_fee_bps ever runs.
+        ts::next_tx(&mut scenario, BUYER);
+        {
+            let mut registry = ts::take_shared<WalMarketRegistry>(&scenario);
+            let ac = ts::take_shared<AccessControl<WALMARKET>>(&scenario);
+            let auth = access_control::new_auth<WALMARKET, FeeManagerRole>(&ac, ts::ctx(&mut scenario));
+            walmarket::set_fee_bps(&mut registry, &auth, 500u64);
+            ts::return_shared(registry);
+            ts::return_shared(ac);
+        };
+
+        ts::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = 18)] // EInvalidFeeBps
+    fun test_set_fee_bps_fails_above_max() {
+        let mut scenario = ts::begin(SELLER);
+        { walmarket::init_for_testing(ts::ctx(&mut scenario)); };
+
+        ts::next_tx(&mut scenario, SELLER);
+        {
+            let mut registry = ts::take_shared<WalMarketRegistry>(&scenario);
+            let ac = ts::take_shared<AccessControl<WALMARKET>>(&scenario);
+            let auth = access_control::new_auth<WALMARKET, FeeManagerRole>(&ac, ts::ctx(&mut scenario));
+            walmarket::set_fee_bps(&mut registry, &auth, 2_001u64); // > MAX_FEE_BPS (2_000)
+            ts::return_shared(registry);
+            ts::return_shared(ac);
+        };
+
+        ts::end(scenario);
+    }
+
+    #[test]
+    fun test_set_fee_recipient_succeeds_for_fee_manager() {
+        let mut scenario = ts::begin(SELLER);
+        { walmarket::init_for_testing(ts::ctx(&mut scenario)); };
+
+        ts::next_tx(&mut scenario, SELLER);
+        {
+            let mut registry = ts::take_shared<WalMarketRegistry>(&scenario);
+            let ac = ts::take_shared<AccessControl<WALMARKET>>(&scenario);
+            let auth = access_control::new_auth<WALMARKET, FeeManagerRole>(&ac, ts::ctx(&mut scenario));
+            walmarket::set_fee_recipient(&mut registry, &auth, FEE_RECIPIENT);
+            ts::return_shared(registry);
+            ts::return_shared(ac);
+        };
+
+        ts::end(scenario);
+    }
+
+    #[test]
+    fun test_pause_blocks_purchase_until_unpaused() {
+        let mut scenario = ts::begin(SELLER);
+        { walmarket::init_for_testing(ts::ctx(&mut scenario)); };
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        make_listing(&mut scenario, &clock);
+
+        ts::next_tx(&mut scenario, SELLER);
+        {
+            let mut registry = ts::take_shared<WalMarketRegistry>(&scenario);
+            let ac = ts::take_shared<AccessControl<WALMARKET>>(&scenario);
+            let auth = access_control::new_auth<WALMARKET, PauserRole>(&ac, ts::ctx(&mut scenario));
+            walmarket::pause(&mut registry, &auth);
+            assert!(walmarket::registry_paused(&registry), 91);
+            ts::return_shared(registry);
+            ts::return_shared(ac);
+        };
+
+        ts::next_tx(&mut scenario, SELLER);
+        {
+            let mut registry = ts::take_shared<WalMarketRegistry>(&scenario);
+            let ac = ts::take_shared<AccessControl<WALMARKET>>(&scenario);
+            let auth = access_control::new_auth<WALMARKET, PauserRole>(&ac, ts::ctx(&mut scenario));
+            walmarket::unpause(&mut registry, &auth);
+            assert!(!walmarket::registry_paused(&registry), 92);
+            ts::return_shared(registry);
+            ts::return_shared(ac);
+        };
+
+        ts::next_tx(&mut scenario, BUYER);
+        {
+            let mut registry = ts::take_shared<WalMarketRegistry>(&scenario);
+            let mut listing = ts::take_shared<MemoryListing>(&scenario);
+            let payment = coin::mint_for_testing<SUI>(1_000_000_000u64, ts::ctx(&mut scenario));
+            walmarket::purchase_listing(&mut registry, &mut listing, payment, &clock, ts::ctx(&mut scenario));
+            ts::return_shared(registry);
+            ts::return_shared(listing);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = 17)] // EProtocolPaused
+    fun test_purchase_fails_while_paused() {
+        let mut scenario = ts::begin(SELLER);
+        { walmarket::init_for_testing(ts::ctx(&mut scenario)); };
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        make_listing(&mut scenario, &clock);
+
+        ts::next_tx(&mut scenario, SELLER);
+        {
+            let mut registry = ts::take_shared<WalMarketRegistry>(&scenario);
+            let ac = ts::take_shared<AccessControl<WALMARKET>>(&scenario);
+            let auth = access_control::new_auth<WALMARKET, PauserRole>(&ac, ts::ctx(&mut scenario));
+            walmarket::pause(&mut registry, &auth);
+            ts::return_shared(registry);
+            ts::return_shared(ac);
+        };
+
+        ts::next_tx(&mut scenario, BUYER);
+        {
+            let mut registry = ts::take_shared<WalMarketRegistry>(&scenario);
+            let mut listing = ts::take_shared<MemoryListing>(&scenario);
+            let payment = coin::mint_for_testing<SUI>(1_000_000_000u64, ts::ctx(&mut scenario));
+            walmarket::purchase_listing(&mut registry, &mut listing, payment, &clock, ts::ctx(&mut scenario));
+            ts::return_shared(registry);
+            ts::return_shared(listing);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    // ─── Test: pay_per_query throughput guard (openzeppelin_utils::rate_limiter) ──
+
+    #[test]
+    #[expected_failure(abort_code = 0, location = openzeppelin_utils::rate_limiter)] // ERateLimited
+    fun test_pay_per_query_rate_limited_after_burst_capacity() {
+        let mut scenario = ts::begin(SELLER);
+        { walmarket::init_for_testing(ts::ctx(&mut scenario)); };
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        make_listing_with_query_price(&mut scenario, &clock, option::some(1_000_000u64));
+
+        // The bucket starts full at QUERY_RATE_CAPACITY (20) and the clock never
+        // advances in this test, so no refill occurs — the 21st call must abort.
+        let mut i = 0u64;
+        while (i < 21) {
+            ts::next_tx(&mut scenario, BUYER);
+            let mut registry = ts::take_shared<WalMarketRegistry>(&scenario);
+            let mut listing = ts::take_shared<MemoryListing>(&scenario);
+            let payment = coin::mint_for_testing<SUI>(1_000_000u64, ts::ctx(&mut scenario));
+            walmarket::pay_per_query(
+                &mut registry, &mut listing, payment, string::utf8(b"q"), &clock, ts::ctx(&mut scenario),
+            );
+            ts::return_shared(registry);
+            ts::return_shared(listing);
+            i = i + 1;
         };
 
         clock::destroy_for_testing(clock);
